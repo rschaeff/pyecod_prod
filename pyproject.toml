@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyecod-prod"
+version = "0.1.0"
+description = "Production pipeline for generating ECOD domain summary files"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "ECOD Team"}
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "psycopg2-binary>=2.9",
+    "biopython>=1.81",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=24.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+pyecod-weekly = "pyecod_prod.cli.weekly:main"
+pyecod-repair = "pyecod_prod.cli.repair:main"
+pyecod-status = "pyecod_prod.cli.status:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "DTZ", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
