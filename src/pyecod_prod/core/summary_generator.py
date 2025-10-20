@@ -112,12 +112,20 @@ class SummaryGenerator:
                     hit_id = hit_id_elem.text
                     hit_def = hit_def_elem.text
 
-                    # Extract ECOD domain ID from hit definition
-                    # Format varies: "e2ia4A1" or "8abc_A e8abcA1,e8abcA2"
-                    ecod_domain_id = self._extract_domain_id(hit_id, hit_def)
+                    # Extract domain ID from hit definition
+                    # For chain BLAST: Hit_def is "6ces A" format (PDB_ID + chain)
+                    # For domain BLAST: Hit_def contains ECOD domain ID like "e6cesA1"
+                    if source == "chain_blast":
+                        # Chain BLAST: extract "pdb_id chain_id" from Hit_def
+                        domain_id = self._extract_chain_id(hit_def)
+                    else:
+                        # Domain BLAST: extract ECOD domain ID
+                        domain_id = self._extract_domain_id(hit_id, hit_def)
 
-                    if not ecod_domain_id:
+                    if not domain_id:
                         continue
+
+                    ecod_domain_id = domain_id
 
                     # Get best HSP (high-scoring segment pair)
                     hsps = hit.findall(".//Hsp")
@@ -185,6 +193,29 @@ class SummaryGenerator:
             return []
 
         return hits
+
+    def _extract_chain_id(self, hit_def: str) -> Optional[str]:
+        """
+        Extract PDB ID and chain from chain BLAST hit definition.
+
+        Args:
+            hit_def: Hit definition (e.g., "6ces A" or "6ces_A")
+
+        Returns:
+            Chain identifier in format "pdb_chain" (e.g., "6ces_A")
+        """
+        # Chain BLAST format: "PDB_ID CHAIN_ID" (e.g., "6ces A")
+        parts = hit_def.strip().split()
+        if len(parts) >= 2:
+            pdb_id = parts[0].lower()  # Normalize to lowercase
+            chain_id = parts[1]
+            return f"{pdb_id}_{chain_id}"
+        elif len(parts) == 1 and "_" in parts[0]:
+            # Already in "pdb_chain" format
+            return parts[0].lower()
+        else:
+            # Can't parse - return as-is
+            return hit_def if hit_def else None
 
     def _extract_domain_id(self, hit_id: str, hit_def: str) -> Optional[str]:
         """

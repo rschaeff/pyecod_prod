@@ -528,6 +528,7 @@ class WeeklyBatch:
                     summary_xml=str(summary_full),
                     output_dir=str(self.dirs.partitions_dir),
                     batch_id=self.batch_name,
+                    blast_dir=str(self.dirs.blast_dir),  # Enable chain BLAST decomposition
                 )
 
                 if result.error_message:

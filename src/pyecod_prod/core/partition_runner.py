@@ -106,6 +106,7 @@ class PartitionRunner:
         summary_xml: str,
         output_dir: str,
         batch_id: Optional[str] = None,
+        blast_dir: Optional[str] = None,
     ) -> PartitionResult:
         """
         Run pyecod-mini on a summary XML file.
@@ -114,6 +115,8 @@ class PartitionRunner:
             summary_xml: Path to domain_summary.xml (input)
             output_dir: Output directory for partition.xml (REQUIRED)
             batch_id: Optional batch ID for tracking
+            blast_dir: Optional path to directory containing BLAST XML files
+                       (enables chain BLAST decomposition)
 
         Returns:
             PartitionResult with domains, coverage, and ECOD quality assessment
@@ -141,6 +144,7 @@ class PartitionRunner:
                 pdb_id=pdb_id,
                 chain_id=chain_id,
                 seq_len=seq_len,
+                blast_dir=blast_dir,
             )
         else:
             result = self._partition_via_cli(
@@ -150,6 +154,7 @@ class PartitionRunner:
                 pdb_id=pdb_id,
                 chain_id=chain_id,
                 seq_len=seq_len,
+                blast_dir=blast_dir,
             )
 
         return result
@@ -162,6 +167,7 @@ class PartitionRunner:
         pdb_id: str,
         chain_id: str,
         seq_len: int,
+        blast_dir: Optional[str] = None,
     ) -> PartitionResult:
         """
         Call pyecod_mini library API.
@@ -176,6 +182,7 @@ class PartitionRunner:
                 pdb_id=pdb_id,
                 chain_id=chain_id,
                 batch_id=batch_id,
+                blast_dir=blast_dir,  # Pass BLAST directory for alignment data
             )
 
             # Convert pyecod_mini domains to pyecod_prod format
@@ -257,6 +264,7 @@ class PartitionRunner:
         pdb_id: str,
         chain_id: str,
         seq_len: int,
+        blast_dir: Optional[str] = None,
     ) -> PartitionResult:
         """
         Call pyecod_mini CLI via subprocess.
@@ -275,6 +283,9 @@ class PartitionRunner:
 
         if batch_id:
             cmd.extend(["--batch-id", batch_id])
+
+        # Note: CLI doesn't support --blast-dir yet, will infer from summary-xml path
+        # blast_dir parameter accepted for API consistency but not used in CLI mode
 
         # Run pyecod-mini
         try:
