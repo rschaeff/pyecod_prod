@@ -140,6 +140,7 @@ class TestSummaryGeneratorWithHHsearch:
               <Hsp_hit-from>1</Hsp_hit-from>
               <Hsp_hit-to>95</Hsp_hit-to>
               <Hsp_align-len>101</Hsp_align-len>
+              <Hsp_identity>80</Hsp_identity>
             </Hsp>
           </Hit_hsps>
         </Hit>
@@ -175,11 +176,13 @@ Probab=99.90  E-value=1.3e-30  Score=200.50  Aligned_cols=100  Identities=35%  S
         with open(hhr_file, 'w') as f:
             f.write(mock_hhr_content)
 
-        # Generate summary
-        generator = SummaryGenerator()
+        # Generate summary (with empty family_lookup for testing)
+        generator = SummaryGenerator(family_lookup={})
+        test_sequence = "M" * 250
         summary_path = generator.generate_summary(
             pdb_id="test",
             chain_id="A",
+            sequence=test_sequence,
             sequence_length=250,
             domain_blast_xml=str(blast_xml),
             hhsearch_xml=str(hhr_file),

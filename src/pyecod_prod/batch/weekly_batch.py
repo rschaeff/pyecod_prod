@@ -24,6 +24,7 @@ from pyecod_prod.parsers.pdb_status import PDBStatusParser
 from pyecod_prod.slurm.blast_runner import BlastRunner
 from pyecod_prod.slurm.hhsearch_runner import HHsearchRunner
 from pyecod_prod.utils.directories import BatchDirectories, write_fasta
+from pyecod_prod.utils.family_lookup import load_family_lookup_for_version
 
 
 class WeeklyBatch:
@@ -69,7 +70,20 @@ class WeeklyBatch:
         self.pdb_parser = PDBStatusParser()
         self.blast_runner = BlastRunner(reference_version=reference_version)
         self.hhsearch_runner = HHsearchRunner(reference_version=reference_version)
-        self.summary_generator = SummaryGenerator(reference_version=reference_version)
+
+        # Load family lookup for summary generation
+        print(f"Loading ECOD family lookup for {reference_version}...")
+        try:
+            family_lookup = load_family_lookup_for_version(reference_version)
+            print(f"  Loaded {len(family_lookup)} domain→family mappings")
+        except FileNotFoundError as e:
+            print(f"  WARNING: Family lookup not found: {e}")
+            family_lookup = {}
+
+        self.summary_generator = SummaryGenerator(
+            reference_version=reference_version,
+            family_lookup=family_lookup
+        )
 
         # pyecod-mini path (installed in user's .local/bin)
         pyecod_mini_path = "/home/rschaeff/.local/bin/pyecod-mini"
@@ -439,6 +453,7 @@ class WeeklyBatch:
 
             pdb_id = chain_data["pdb_id"]
             chain_id = chain_data["chain_id"]
+            sequence = chain_data["sequence"]
             seq_len = chain_data["sequence_length"]
 
             # Get BLAST file paths
@@ -458,11 +473,13 @@ class WeeklyBatch:
                 self.summary_generator.generate_summary(
                     pdb_id=pdb_id,
                     chain_id=chain_id,
+                    sequence=sequence,
                     sequence_length=seq_len,
                     chain_blast_xml=chain_blast_xml,
                     domain_blast_xml=domain_blast_xml,
                     hhsearch_xml=hhsearch_hhr,
                     output_path=summary_path,
+                    batch_id=self.batch_name,
                 )
 
                 # Update manifest

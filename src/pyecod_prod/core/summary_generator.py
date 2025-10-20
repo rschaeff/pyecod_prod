@@ -4,13 +4,16 @@ Generate domain summary XML files from BLAST and HHsearch results.
 
 The domain summary combines evidence from multiple sources into a unified
 XML format that pyecod-mini uses for domain partitioning.
+
+Output format complies with PYECOD_MINI_API_SPEC.md.
 """
 
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -19,10 +22,13 @@ class BlastHit:
 
     source: str  # 'chain_blast' or 'domain_blast'
     ecod_domain_id: str  # Domain ID from hit (may be comma-separated for chain hits)
+    family_name: str  # ECOD family name (e.g., "GFP-like")
     query_range: str  # e.g., "10-110" or "10-110,150-200"
+    target_range: str  # Alignment range in reference
     reference_coverage: float  # Coverage of reference domain
     evalue: float
     bitscore: float
+    identity: float  # Sequence identity (0.0-1.0)
     alignment_length: int
 
 
@@ -32,7 +38,9 @@ class HHsearchHit:
 
     source: str  # 'hhsearch'
     ecod_domain_id: str  # Domain ID from hit
+    family_name: str  # ECOD family name
     query_range: str  # e.g., "10-110"
+    target_range: str  # Alignment range in reference
     reference_coverage: float  # Coverage of reference domain
     evalue: float
     probability: float  # HHsearch probability (0-100)
@@ -43,18 +51,26 @@ class SummaryGenerator:
     """
     Generate domain_summary.xml from BLAST and HHsearch results.
 
+    Output format per PYECOD_MINI_API_SPEC.md.
+
     Phase 2: BLAST-only mode
     Phase 3: Added HHsearch support for low-coverage chains
     """
 
-    def __init__(self, reference_version: str = "develop291"):
+    def __init__(
+        self,
+        reference_version: str = "develop291",
+        family_lookup: Optional[Dict[str, str]] = None
+    ):
         """
         Initialize summary generator.
 
         Args:
             reference_version: ECOD reference version
+            family_lookup: Optional dict mapping domain IDs to family names
         """
         self.reference_version = reference_version
+        self.family_lookup = family_lookup or {}
 
     def parse_blast_xml(self, blast_xml: str, source: str) -> List[BlastHit]:
         """
@@ -128,20 +144,33 @@ class SummaryGenerator:
                         hit_len_elem = hit.find("Hit_len")
                         hit_len = int(hit_len_elem.text) if hit_len_elem is not None else 0
 
+                        target_range = f"{hit_from}-{hit_to}"
+
                         # Calculate reference coverage
                         if hit_len > 0:
                             hit_coverage = (hit_to - hit_from + 1) / hit_len
                         else:
                             hit_coverage = 0.0
 
+                        # Get identity
+                        identity_elem = hsp.find("Hsp_identity")
+                        identity_count = int(identity_elem.text) if identity_elem is not None else 0
+                        identity = identity_count / align_len if align_len > 0 else 0.0
+
+                        # Get family name from lookup
+                        family_name = self.family_lookup.get(ecod_domain_id, "Unknown")
+
                         # Create BlastHit
                         blast_hit = BlastHit(
                             source=source,
                             ecod_domain_id=ecod_domain_id,
+                            family_name=family_name,
                             query_range=query_range,
+                            target_range=target_range,
                             reference_coverage=hit_coverage,
                             evalue=evalue,
                             bitscore=bitscore,
+                            identity=identity,
                             alignment_length=align_len,
                         )
 
@@ -217,10 +246,15 @@ class SummaryGenerator:
                 else:
                     template_coverage = 0.0
 
+                # Get family name from lookup
+                family_name = self.family_lookup.get(hit.hit_id, "Unknown")
+
                 hhsearch_hit = HHsearchHit(
                     source=source,
                     ecod_domain_id=hit.hit_id,
+                    family_name=family_name,
                     query_range=hit.query_range,
+                    target_range=hit.template_range,
                     reference_coverage=template_coverage,
                     evalue=hit.evalue,
                     probability=hit.probability,
@@ -247,57 +281,75 @@ class SummaryGenerator:
         self,
         pdb_id: str,
         chain_id: str,
+        sequence: str,
         sequence_length: int,
         chain_blast_xml: Optional[str] = None,
         domain_blast_xml: Optional[str] = None,
         hhsearch_xml: Optional[str] = None,
         output_path: Optional[str] = None,
+        batch_id: Optional[str] = None,
     ) -> str:
         """
-        Generate domain summary XML from BLAST results.
+        Generate domain summary XML from BLAST and HHsearch results.
+
+        Output format per PYECOD_MINI_API_SPEC.md.
 
         Args:
             pdb_id: PDB ID
             chain_id: Chain ID
+            sequence: Amino acid sequence (REQUIRED by pyecod_mini)
             sequence_length: Protein sequence length
             chain_blast_xml: Path to chain BLAST XML (optional)
             domain_blast_xml: Path to domain BLAST XML (optional)
-            hhsearch_xml: Path to HHsearch XML (optional, Phase 3)
+            hhsearch_xml: Path to HHsearch HHR file (optional, Phase 3)
             output_path: Output path (auto-generated if None)
+            batch_id: Optional batch ID for tracking
 
         Returns:
             Path to generated summary XML
         """
-        # Create summary XML
+        # Create summary XML per API spec
         root = ET.Element("domain_summary")
+        root.set("version", "1.0")  # Schema version
 
-        # Protein metadata
+        # Protein metadata (attributes per API spec)
         protein = ET.SubElement(root, "protein")
-        ET.SubElement(protein, "pdb_id").text = pdb_id.lower()
-        ET.SubElement(protein, "chain_id").text = chain_id
-        ET.SubElement(protein, "reference").text = self.reference_version
-        ET.SubElement(protein, "length").text = str(sequence_length)
+        protein.set("pdb_id", pdb_id.lower())
+        protein.set("chain_id", chain_id)
+        protein.set("length", str(sequence_length))
 
-        # Evidence list
-        evidence_list = ET.SubElement(root, "evidence_list")
+        # Sequence (REQUIRED by pyecod_mini)
+        sequence_elem = ET.SubElement(protein, "sequence")
+        sequence_elem.text = sequence
+
+        # Evidence container (per API spec)
+        evidence = ET.SubElement(root, "evidence")
 
         # Parse domain BLAST
         if domain_blast_xml and os.path.exists(domain_blast_xml):
             domain_hits = self.parse_blast_xml(domain_blast_xml, "domain_blast")
             for hit in domain_hits:
-                self._add_blast_evidence(evidence_list, hit)
+                self._add_blast_hit(evidence, hit)
 
         # Parse chain BLAST
         if chain_blast_xml and os.path.exists(chain_blast_xml):
             chain_hits = self.parse_blast_xml(chain_blast_xml, "chain_blast")
             for hit in chain_hits:
-                self._add_blast_evidence(evidence_list, hit)
+                self._add_blast_hit(evidence, hit)
 
         # Parse HHsearch results (Phase 3)
         if hhsearch_xml and os.path.exists(hhsearch_xml):
             hhsearch_hits = self.parse_hhsearch_hhr(hhsearch_xml, "hhsearch")
             for hit in hhsearch_hits:
-                self._add_hhsearch_evidence(evidence_list, hit)
+                self._add_hhsearch_hit(evidence, hit)
+
+        # Metadata section (per API spec)
+        metadata = ET.SubElement(root, "metadata")
+        if batch_id:
+            batch_elem = ET.SubElement(metadata, "batch_id")
+            batch_elem.text = batch_id
+        timestamp_elem = ET.SubElement(metadata, "timestamp")
+        timestamp_elem.text = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Generate output path if not provided
         if output_path is None:
@@ -308,45 +360,46 @@ class SummaryGenerator:
 
         return output_path
 
-    def _add_blast_evidence(self, evidence_list: ET.Element, hit: BlastHit):
+    def _add_blast_hit(self, evidence: ET.Element, hit: BlastHit):
         """
-        Add BLAST hit as evidence element.
+        Add BLAST hit as <hit> element per API spec.
 
         Args:
-            evidence_list: Evidence list XML element
+            evidence: Evidence container XML element
             hit: BlastHit object
         """
-        evidence = ET.SubElement(evidence_list, "evidence")
-        evidence.set("source", hit.source)
-        evidence.set("ecod_domain_id", hit.ecod_domain_id)
-        evidence.set("query_range", hit.query_range)
-        evidence.set("reference_coverage", f"{hit.reference_coverage:.3f}")
-        evidence.set("evalue", f"{hit.evalue:.2e}")
+        hit_elem = ET.SubElement(evidence, "hit")
+        hit_elem.set("type", hit.source)  # chain_blast or domain_blast
+        hit_elem.set("target", hit.ecod_domain_id)
+        hit_elem.set("target_family", hit.family_name)
+        hit_elem.set("evalue", f"{hit.evalue:.2e}")
+        hit_elem.set("bitscore", f"{hit.bitscore:.1f}")
+        hit_elem.set("identity", f"{hit.identity:.2f}")
+        hit_elem.set("coverage", f"{hit.reference_coverage:.2f}")
+        hit_elem.set("query_range", hit.query_range)
+        hit_elem.set("target_range", hit.target_range)
 
-        # Optional attributes
-        if hit.bitscore:
-            evidence.set("bitscore", f"{hit.bitscore:.1f}")
-
-    def _add_hhsearch_evidence(self, evidence_list: ET.Element, hit: HHsearchHit):
+    def _add_hhsearch_hit(self, evidence: ET.Element, hit: HHsearchHit):
         """
-        Add HHsearch hit as evidence element.
+        Add HHsearch hit as <hit> element per API spec.
 
         Args:
-            evidence_list: Evidence list XML element
+            evidence: Evidence container XML element
             hit: HHsearchHit object
         """
-        evidence = ET.SubElement(evidence_list, "evidence")
-        evidence.set("source", hit.source)
-        evidence.set("ecod_domain_id", hit.ecod_domain_id)
-        evidence.set("query_range", hit.query_range)
-        evidence.set("reference_coverage", f"{hit.reference_coverage:.3f}")
-        evidence.set("evalue", f"{hit.evalue:.2e}")
-        evidence.set("probability", f"{hit.probability:.1f}")
-        evidence.set("score", f"{hit.score:.1f}")
+        hit_elem = ET.SubElement(evidence, "hit")
+        hit_elem.set("type", hit.source)  # hhsearch
+        hit_elem.set("target", hit.ecod_domain_id)
+        hit_elem.set("target_family", hit.family_name)
+        hit_elem.set("probability", f"{hit.probability:.1f}")
+        hit_elem.set("evalue", f"{hit.evalue:.2e}")
+        hit_elem.set("score", f"{hit.score:.1f}")
+        hit_elem.set("query_range", hit.query_range)
+        hit_elem.set("target_range", hit.target_range)
 
     def _write_pretty_xml(self, root: ET.Element, output_path: str):
         """
-        Write XML with pretty formatting.
+        Write XML with pretty formatting and XML declaration.
 
         Args:
             root: Root XML element
@@ -359,9 +412,9 @@ class SummaryGenerator:
         from xml.dom import minidom
 
         dom = minidom.parseString(xml_str)
-        pretty_xml = dom.toprettyxml(indent="  ")
+        pretty_xml = dom.toprettyxml(indent="  ", encoding=None)
 
-        # Remove blank lines
+        # Remove blank lines but keep XML declaration
         lines = [line for line in pretty_xml.split("\n") if line.strip()]
 
         with open(output_path, "w") as f:
@@ -372,13 +425,18 @@ def main():
     """Command-line interface for testing"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate domain summary XML from BLAST results")
+    parser = argparse.ArgumentParser(
+        description="Generate domain summary XML from BLAST results (per PYECOD_MINI_API_SPEC.md)"
+    )
     parser.add_argument("pdb_id", help="PDB ID")
     parser.add_argument("chain_id", help="Chain ID")
+    parser.add_argument("--sequence", required=True, help="Amino acid sequence")
     parser.add_argument("--length", type=int, required=True, help="Sequence length")
     parser.add_argument("--chain-blast", help="Chain BLAST XML file")
     parser.add_argument("--domain-blast", help="Domain BLAST XML file")
+    parser.add_argument("--hhsearch", help="HHsearch HHR file")
     parser.add_argument("--output", "-o", help="Output path")
+    parser.add_argument("--batch-id", help="Batch ID")
     parser.add_argument("--reference", default="develop291", help="Reference version")
 
     args = parser.parse_args()
@@ -388,10 +446,13 @@ def main():
     output_path = generator.generate_summary(
         pdb_id=args.pdb_id,
         chain_id=args.chain_id,
+        sequence=args.sequence,
         sequence_length=args.length,
         chain_blast_xml=args.chain_blast,
         domain_blast_xml=args.domain_blast,
+        hhsearch_xml=args.hhsearch,
         output_path=args.output,
+        batch_id=args.batch_id,
     )
 
     print(f"Generated summary: {output_path}")

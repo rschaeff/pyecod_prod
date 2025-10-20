@@ -64,6 +64,7 @@ class TestBlastWorkflow:
               <Hsp_hit-from>1</Hsp_hit-from>
               <Hsp_hit-to>95</Hsp_hit-to>
               <Hsp_align-len>101</Hsp_align-len>
+              <Hsp_identity>85</Hsp_identity>
             </Hsp>
           </Hit_hsps>
         </Hit>
@@ -123,11 +124,13 @@ class TestBlastWorkflow:
         with open(blast_xml, "w") as f:
             f.write(mock_blast_xml)
 
-        # Generate summary
-        generator = SummaryGenerator()
+        # Generate summary (with empty family_lookup for testing)
+        generator = SummaryGenerator(family_lookup={})
+        test_sequence = "M" * 250
         summary_path = generator.generate_summary(
             pdb_id="8abc",
             chain_id="A",
+            sequence=test_sequence,
             sequence_length=250,
             domain_blast_xml=str(blast_xml),
             output_path=str(Path(temp_batch_dir) / "summary.xml"),
@@ -192,14 +195,15 @@ class TestBlastWorkflow:
             },
         )
 
-        # Generate summary
-        generator = SummaryGenerator()
+        # Generate summary (with empty family_lookup for testing)
+        generator = SummaryGenerator(family_lookup={})
         summary_path = dirs.get_summary_path("8abc", "A")
         summary_path.parent.mkdir(parents=True, exist_ok=True)
 
         generator.generate_summary(
             pdb_id="8abc",
             chain_id="A",
+            sequence=test_sequence,
             sequence_length=len(test_sequence),
             chain_blast_xml=str(chain_blast_path),
             domain_blast_xml=str(domain_blast_path),
