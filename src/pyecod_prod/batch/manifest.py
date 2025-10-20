@@ -241,6 +241,7 @@ class BatchManifest:
         domain_count: int,
         partition_quality: str,
         file_paths: Optional[Dict[str, str]] = None,
+        algorithm_version: Optional[str] = None,
     ):
         """
         Mark partitioning as complete for a chain.
@@ -252,6 +253,7 @@ class BatchManifest:
             domain_count: Number of domains
             partition_quality: Quality assessment
             file_paths: Dict of file paths to add
+            algorithm_version: pyecod_mini algorithm version (for reproducibility)
         """
         updates = {
             "partition_status": "complete",
@@ -260,6 +262,9 @@ class BatchManifest:
             "partition_quality": partition_quality,
             "partition_complete_time": datetime.now().isoformat(),
         }
+
+        if algorithm_version:
+            updates["algorithm_version"] = algorithm_version
 
         if file_paths:
             updates["files"] = file_paths

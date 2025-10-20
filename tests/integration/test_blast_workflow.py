@@ -124,8 +124,9 @@ class TestBlastWorkflow:
         with open(blast_xml, "w") as f:
             f.write(mock_blast_xml)
 
-        # Generate summary (with empty family_lookup for testing)
-        generator = SummaryGenerator(family_lookup={})
+        # Generate summary with realistic family lookup
+        family_lookup = {"e2ia4A1": "Ras-like GTPase"}
+        generator = SummaryGenerator(family_lookup=family_lookup)
         test_sequence = "M" * 250
         summary_path = generator.generate_summary(
             pdb_id="8abc",
@@ -138,12 +139,18 @@ class TestBlastWorkflow:
 
         assert Path(summary_path).exists()
 
-        # Verify summary content
-        with open(summary_path) as f:
-            content = f.read()
-            assert "domain_summary" in content
-            assert "8abc" in content
-            assert "e2ia4A1" in content
+        # Verify summary content includes family name
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(summary_path)
+        root = tree.getroot()
+
+        assert root.tag == "domain_summary"
+        assert root.find(".//protein").get("pdb_id") == "8abc"
+
+        # Check that hit has target_family attribute
+        hit = root.find(".//hit")
+        assert hit.get("target") == "e2ia4A1"
+        assert hit.get("target_family") == "Ras-like GTPase"
 
     def test_complete_workflow_no_blast(self, temp_batch_dir, mock_blast_xml):
         """Test complete workflow without BLAST submission"""
@@ -195,8 +202,9 @@ class TestBlastWorkflow:
             },
         )
 
-        # Generate summary (with empty family_lookup for testing)
-        generator = SummaryGenerator(family_lookup={})
+        # Generate summary with realistic family lookup
+        family_lookup = {"e2ia4A1": "Ras-like GTPase"}
+        generator = SummaryGenerator(family_lookup=family_lookup)
         summary_path = dirs.get_summary_path("8abc", "A")
         summary_path.parent.mkdir(parents=True, exist_ok=True)
 

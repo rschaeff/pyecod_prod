@@ -176,8 +176,12 @@ Probab=99.90  E-value=1.3e-30  Score=200.50  Aligned_cols=100  Identities=35%  S
         with open(hhr_file, 'w') as f:
             f.write(mock_hhr_content)
 
-        # Generate summary (with empty family_lookup for testing)
-        generator = SummaryGenerator(family_lookup={})
+        # Generate summary with realistic family lookup
+        family_lookup = {
+            "e5xyzA1": "Alpha-beta plait",
+            "e2ia4A1": "Ras-like GTPase"
+        }
+        generator = SummaryGenerator(family_lookup=family_lookup)
         test_sequence = "M" * 250
         summary_path = generator.generate_summary(
             pdb_id="test",
@@ -191,16 +195,25 @@ Probab=99.90  E-value=1.3e-30  Score=200.50  Aligned_cols=100  Identities=35%  S
 
         assert Path(summary_path).exists()
 
-        # Verify summary contains both BLAST and HHsearch evidence
-        with open(summary_path) as f:
-            content = f.read()
-            # Should have BLAST hit
-            assert "e5xyzA1" in content
-            assert "domain_blast" in content
-            # Should have HHsearch hit
-            assert "e2ia4A1" in content
-            assert "hhsearch" in content
-            assert "probability" in content
+        # Verify summary contains both BLAST and HHsearch evidence with family names
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(summary_path)
+        root = tree.getroot()
+
+        # Find all hits
+        hits = root.findall(".//hit")
+        assert len(hits) == 2  # One BLAST, one HHsearch
+
+        # Check BLAST hit
+        blast_hit = [h for h in hits if h.get("type") == "domain_blast"][0]
+        assert blast_hit.get("target") == "e5xyzA1"
+        assert blast_hit.get("target_family") == "Alpha-beta plait"
+
+        # Check HHsearch hit
+        hhsearch_hit = [h for h in hits if h.get("type") == "hhsearch"][0]
+        assert hhsearch_hit.get("target") == "e2ia4A1"
+        assert hhsearch_hit.get("target_family") == "Ras-like GTPase"
+        assert "probability" in hhsearch_hit.attrib
 
 
 class TestTwoPassWorkflow:

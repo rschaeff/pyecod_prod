@@ -182,6 +182,88 @@ class TestBatchManifest:
             assert summary["blast_complete"] == "1/2"
             assert summary["blast_pct"] == 50.0
 
+    def test_mark_partition_complete_with_version(self):
+        """Test marking partition complete with algorithm version tracking"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = BatchManifest(tmpdir)
+
+            manifest.add_chain("8abc", "A", "MKTAYIAKQRQ" * 20, 220, True)
+            manifest.mark_blast_complete("8abc", "A", coverage=0.95)
+
+            # Mark partition complete with version
+            manifest.mark_partition_complete(
+                "8abc",
+                "A",
+                partition_coverage=0.88,
+                domain_count=2,
+                partition_quality="good",
+                file_paths={"partition": "partitions/8abc_A.partition.xml"},
+                algorithm_version="2.0.0",
+            )
+
+            chain = manifest.data["chains"]["8abc_A"]
+
+            assert chain["partition_status"] == "complete"
+            assert chain["partition_coverage"] == 0.88
+            assert chain["domain_count"] == 2
+            assert chain["partition_quality"] == "good"
+            assert chain["algorithm_version"] == "2.0.0"
+            assert "partition_complete_time" in chain
+            assert "partition" in chain["files"]
+
+    def test_mark_partition_complete_without_version(self):
+        """Test marking partition complete without algorithm version (backward compat)"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = BatchManifest(tmpdir)
+
+            manifest.add_chain("8abc", "A", "MKTAYIAKQRQ" * 20, 220, True)
+            manifest.mark_blast_complete("8abc", "A", coverage=0.95)
+
+            # Mark partition complete without version (should still work)
+            manifest.mark_partition_complete(
+                "8abc",
+                "A",
+                partition_coverage=0.75,
+                domain_count=1,
+                partition_quality="low_coverage",
+            )
+
+            chain = manifest.data["chains"]["8abc_A"]
+
+            assert chain["partition_status"] == "complete"
+            assert chain["partition_coverage"] == 0.75
+            assert chain["domain_count"] == 1
+            assert chain["partition_quality"] == "low_coverage"
+            assert "algorithm_version" not in chain  # Not provided
+
+    def test_partition_quality_values(self):
+        """Test different partition quality values"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = BatchManifest(tmpdir)
+
+            # Test all quality levels
+            test_cases = [
+                ("8good", "A", 0.90, 2, "good"),
+                ("8low", "A", 0.65, 1, "low_coverage"),
+                ("8frag", "A", 0.30, 1, "fragmentary"),
+                ("8none", "A", 0.00, 0, "no_domains"),
+            ]
+
+            for pdb_id, chain_id, coverage, count, quality in test_cases:
+                manifest.add_chain(pdb_id, chain_id, "M" * 200, 200, True)
+                manifest.mark_blast_complete(pdb_id, chain_id, coverage=0.95)
+                manifest.mark_partition_complete(
+                    pdb_id,
+                    chain_id,
+                    partition_coverage=coverage,
+                    domain_count=count,
+                    partition_quality=quality,
+                    algorithm_version="2.0.0",
+                )
+
+                chain_key = f"{pdb_id}_{chain_id}"
+                assert manifest.data["chains"][chain_key]["partition_quality"] == quality
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

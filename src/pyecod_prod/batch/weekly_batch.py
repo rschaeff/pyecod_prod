@@ -545,6 +545,7 @@ class WeeklyBatch:
                     domain_count=result.domain_count,
                     partition_quality=result.partition_quality,
                     file_paths={"partition": partition_rel},
+                    algorithm_version=result.algorithm_version,
                 )
 
                 partitioned += 1
