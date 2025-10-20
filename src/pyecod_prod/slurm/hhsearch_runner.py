@@ -22,12 +22,13 @@ class HHsearchRunner:
     """
 
     # HHsearch database (v291)
-    HHSEARCH_DB = "/data/ecod/database_versions/v291/ecod_v291_hhm"
+    # Note: HHsearch automatically appends _hhm.ffdata and _hhm.ffindex
+    HHSEARCH_DB = "/data/ecod/database_versions/v291/ecod_v291"
 
     # HHsearch parameters
     HHSEARCH_EVALUE = 0.001
     HHSEARCH_MIN_PROB = 50  # Minimum probability threshold
-    HHSEARCH_MAX_HITS = 5000
+    HHSEARCH_MAX_ALIGNMENTS = 5000  # Max alignments to show (-Z parameter)
 
     def __init__(
         self,
@@ -52,8 +53,8 @@ class HHsearchRunner:
 
     def _check_hhsearch_db(self, db_path: str) -> bool:
         """Check if HHsearch database files exist"""
-        # HH-suite3 uses .ffdata and .ffindex files
-        return Path(f"{db_path}.ffdata").exists() and Path(f"{db_path}.ffindex").exists()
+        # HH-suite3 uses .ffdata and .ffindex files with _hhm suffix
+        return Path(f"{db_path}_hhm.ffdata").exists() and Path(f"{db_path}_hhm.ffindex").exists()
 
     def create_hhsearch_script(
         self,
@@ -62,6 +63,7 @@ class HHsearchRunner:
         output_dir: str,
         partition: str = "96GB",
         time_limit: str = "8:00:00",
+        array_limit: int = 500,
     ) -> str:
         """
         Create SLURM script for HHsearch job array.
@@ -106,15 +108,15 @@ class HHsearchRunner:
         script_content = f"""#!/bin/bash
 #SBATCH --job-name=hhsearch
 #SBATCH --partition={partition}
-#SBATCH --array=1-{num_files}
+#SBATCH --array=1-{num_files}%{array_limit}
 #SBATCH --time={time_limit}
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
 #SBATCH --output={batch_dir}/slurm_logs/hhsearch_%A_%a.out
 #SBATCH --error={batch_dir}/slurm_logs/hhsearch_%A_%a.err
 
-# Load HH-suite module (adjust for your cluster)
-# module load hh-suite
+# Add HH-suite to PATH
+export PATH="/sw/apps/hh-suite/bin:$PATH"
 
 # Get FASTA file for this array task
 FASTA_FILE=$(sed -n "${{SLURM_ARRAY_TASK_ID}}p" {file_list})
@@ -138,7 +140,8 @@ hhsearch \\
     -o "$HHSEARCH_OUT" \\
     -e {self.HHSEARCH_EVALUE} \\
     -p {self.HHSEARCH_MIN_PROB} \\
-    -n {self.HHSEARCH_MAX_HITS} \\
+    -Z {self.HHSEARCH_MAX_ALIGNMENTS} \\
+    -B {self.HHSEARCH_MAX_ALIGNMENTS} \\
     -cpu ${{SLURM_CPUS_PER_TASK}} \\
     -v 2
 
@@ -189,10 +192,11 @@ echo "HHsearch complete for $BASENAME"
             fasta_dir=fasta_dir,
             output_dir=output_dir,
             partition=partition,
+            array_limit=array_limit,
         )
 
-        # Submit to SLURM with array limit
-        cmd = ["sbatch", f"--array=%{array_limit}", script_path]
+        # Submit to SLURM (array limit is in the script)
+        cmd = ["sbatch", script_path]
 
         print(f"Submitting HHsearch jobs: {' '.join(cmd)}")
 

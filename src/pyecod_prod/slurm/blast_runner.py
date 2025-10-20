@@ -69,6 +69,7 @@ class BlastRunner:
         blast_type: str = "both",
         partition: str = "96GB",
         time_limit: str = "4:00:00",
+        array_limit: int = 500,
     ) -> str:
         """
         Create SLURM script for BLAST job array.
@@ -114,15 +115,15 @@ class BlastRunner:
         script_content = f"""#!/bin/bash
 #SBATCH --job-name=blast_{blast_type}
 #SBATCH --partition={partition}
-#SBATCH --array=1-{num_files}
+#SBATCH --array=1-{num_files}%{array_limit}
 #SBATCH --time={time_limit}
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=1
 #SBATCH --output={batch_dir}/slurm_logs/blast_%A_%a.out
 #SBATCH --error={batch_dir}/slurm_logs/blast_%A_%a.err
 
-# Load BLAST module (adjust for your cluster)
-# module load blast+
+# Add BLAST to PATH
+export PATH="/sw/apps/ncbi-blast-2.15.0+/bin:$PATH"
 
 # Get FASTA file for this array task
 FASTA_FILE=$(sed -n "${{SLURM_ARRAY_TASK_ID}}p" {file_list})
@@ -217,11 +218,13 @@ echo "BLAST complete for $BASENAME"
             output_dir=output_dir,
             blast_type=blast_type,
             partition=partition,
+            array_limit=array_limit,
         )
 
         # Submit to SLURM with array limit
         # Format: --array=1-N%LIMIT means max LIMIT jobs running concurrently
-        cmd = ["sbatch", f"--array=%{array_limit}", script_path]
+        # Note: Don't override array range here, it's in the script
+        cmd = ["sbatch", script_path]
 
         print(f"Submitting BLAST jobs: {' '.join(cmd)}")
 

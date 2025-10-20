@@ -70,7 +70,10 @@ class WeeklyBatch:
         self.blast_runner = BlastRunner(reference_version=reference_version)
         self.hhsearch_runner = HHsearchRunner(reference_version=reference_version)
         self.summary_generator = SummaryGenerator(reference_version=reference_version)
-        self.partition_runner = PartitionRunner()
+
+        # pyecod-mini path (installed in user's .local/bin)
+        pyecod_mini_path = "/home/rschaeff/.local/bin/pyecod-mini"
+        self.partition_runner = PartitionRunner(pyecod_mini_path=pyecod_mini_path)
 
         # Initialize or load manifest
         self.manifest = BatchManifest(str(self.batch_path))
@@ -320,8 +323,14 @@ class WeeklyBatch:
         hhsearch_fastas_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy FASTA files for chains needing HHsearch
-        for chain_key in hhsearch_chains:
-            pdb_id, chain_id = chain_key.split("_")
+        # Note: hhsearch_chains is a list of chain data dicts
+        chain_keys = []
+        for chain_data in hhsearch_chains:
+            pdb_id = chain_data["pdb_id"]
+            chain_id = chain_data["chain_id"]
+            chain_key = f"{pdb_id}_{chain_id}"
+            chain_keys.append(chain_key)
+
             source_fasta = self.dirs.get_fasta_path(pdb_id, chain_id)
             dest_fasta = hhsearch_fastas_dir / f"{pdb_id}_{chain_id}.fa"
 
@@ -337,11 +346,11 @@ class WeeklyBatch:
             array_limit=array_limit,
         )
 
-        # Record job in manifest
+        # Record job in manifest (need chain keys, not chain data dicts)
         self.manifest.add_slurm_job(
             job_id=job_id,
             job_type="hhsearch",
-            chains=hhsearch_chains,
+            chains=chain_keys,
             partition=partition,
         )
         self.manifest.save()
@@ -400,7 +409,7 @@ class WeeklyBatch:
                 }
 
                 self.manifest.mark_hhsearch_complete(
-                    pdb_id, chain_id, coverage=coverage, file_paths=file_paths
+                    pdb_id, chain_id, file_paths=file_paths
                 )
 
                 processed += 1
