@@ -20,12 +20,13 @@ The domain partitioning algorithm lives in the separate **pyecod_mini** reposito
 
 **pyecod_prod** (this repo):
 - ✅ PDB data acquisition and parsing
+- ✅ Sequence clustering (mmseqs2/CD-HIT) for redundancy reduction
 - ✅ BLAST/HHsearch execution via SLURM
 - ✅ Evidence generation (domain_summary.xml)
 - ✅ Batch workflow orchestration (9-step pipeline)
 - ✅ State tracking (manifest)
 - ✅ Quality policy decisions (coverage thresholds)
-- ✅ Database integration (future)
+- ✅ Database integration for tracking and coordination
 - ✅ Calls pyecod_mini for domain partitioning (step 8)
 
 **pyecod_mini** (separate repo):
@@ -168,6 +169,8 @@ else:
 BLAST+: /sw/apps/ncbi-blast-2.15.0+/bin/blastp
 HH-suite: /sw/apps/hh-suite/bin/hhsearch
 pyecod-mini: /home/rschaeff/.local/bin/pyecod-mini
+mmseqs2: /sw/apps/mmseqs/bin/mmseqs
+CD-HIT: /sw/apps/cdhit/cd-hit
 ```
 
 ### PDB Data Locations
@@ -184,6 +187,10 @@ Status files: /usr2/pdb/data/status/{YYYYMMDD}/added.pdb
 ├── batch_manifest.yaml      # Primary state tracking
 ├── pdb_entries.txt          # Reference copy of added.pdb
 ├── fastas/                  # Input FASTA files
+│   └── all_chains.fasta     # Combined FASTA for clustering
+├── clustering/              # Sequence clustering results (optional)
+│   ├── mmseqs_70pct_cluster.tsv
+│   └── mmseqs_70pct_rep_seq.fasta
 ├── blast/                   # BLAST XML results (chain + domain)
 ├── hhsearch/                # HHsearch HHR results (low-coverage only)
 ├── summaries/               # Domain summary XML (BLAST + HHsearch combined)
@@ -290,6 +297,75 @@ status = batch.blast_runner.check_job_status(job_id)
 batch.process_blast_results()
 ```
 
+### Resuming Large Batches
+
+When resuming a batch with interrupted BLAST/HHsearch jobs, use the `scripts/resume_batch.py` helper script or manually filter chains:
+
+```python
+from pyecod_prod.batch.weekly_batch import WeeklyBatch
+
+batch = WeeklyBatch(
+    release_date="2025-09-05",
+    pdb_status_dir="/usr2/pdb/data/status/20250905",
+    base_path="/data/ecod/pdb_updates/batches",
+    reference_version="develop291"
+)
+
+# Step 1: Process existing results
+batch.process_blast_results()
+batch.process_hhsearch_results()
+
+# Step 2: Generate summaries for completed chains
+batch.generate_summaries()
+
+# Step 3: Identify chains still needing processing
+blast_needed = [
+    f"{chain_data['pdb_id']}_{chain_data['chain_id']}"
+    for chain_data in batch.manifest.data['chains'].values()
+    if chain_data['blast_status'] != 'complete' and chain_data['can_classify']
+]
+
+hhsearch_needed = [
+    f"{chain_data['pdb_id']}_{chain_data['chain_id']}"
+    for chain_data in batch.manifest.chains_needing_hhsearch()
+    if chain_data['hhsearch_status'] != 'complete'
+]
+
+# Step 4: Submit jobs ONLY for chains that need them
+if blast_needed:
+    job_id = batch.blast_runner.submit_blast_jobs(
+        batch_dir=str(batch.batch_path),
+        fasta_dir=str(batch.dirs.fastas_dir),
+        output_dir=str(batch.dirs.blast_dir),
+        blast_type="both",
+        partition="96GB",
+        array_limit=500,
+        chain_filter=blast_needed  # CRITICAL: Only submit needed chains
+    )
+    print(f"Submitted BLAST for {len(blast_needed)} chains: job {job_id}")
+
+if hhsearch_needed:
+    job_id = batch.hhsearch_runner.submit_hhsearch_jobs(
+        batch_dir=str(batch.batch_path),
+        fasta_dir=str(batch.dirs.fastas_dir),
+        output_dir=str(batch.dirs.hhsearch_dir),
+        partition="96GB",
+        array_limit=500,
+        chain_filter=hhsearch_needed  # CRITICAL: Only submit needed chains
+    )
+    print(f"Submitted HHsearch for {len(hhsearch_needed)} chains: job {job_id}")
+
+# Step 5: After jobs complete, process results and run partitioning
+# batch.process_blast_results()
+# batch.process_hhsearch_results()
+# batch.generate_summaries()
+# batch.run_partitioning()
+```
+
+**Why chain filtering is critical**: Without filtering, SLURM jobs are created for ALL FASTA files in the directory, which may exceed the 1000-job array limit. Chain filtering ensures jobs are only submitted for chains that actually need processing.
+
+**See also**: `scripts/resume_batch.py` for automated resume with interactive prompts.
+
 ## Troubleshooting
 
 ### Check SLURM Logs
@@ -324,6 +400,8 @@ ls -lh /data/ecod/database_versions/v291/ecod_v291_hhm*
 
 **Partitioning fails**: Check pyecod_mini is installed (`pip list | grep pyecod-mini`). Verify version compatibility with PYECOD_MINI_API_SPEC.md. Check partition_runner.py logs.
 
+**SLURM array limit exceeded (>1000 jobs)**: This occurs when resuming batches with many FASTA files but fewer chains needing processing. The `BlastRunner` and `HHsearchRunner` now support chain filtering via the `chain_filter` parameter. See "Resuming Large Batches" section below.
+
 ## File Paths Reference
 
 ### Key Source Files
@@ -335,6 +413,9 @@ ls -lh /data/ecod/database_versions/v291/ecod_v291_hhm*
 - HHsearch runner: `src/pyecod_prod/slurm/hhsearch_runner.py`
 - Summary generator: `src/pyecod_prod/core/summary_generator.py`
 - Partition runner: `src/pyecod_prod/core/partition_runner.py` (integration with pyecod_mini)
+- Clustering runner: `scripts/run_clustering.py` (standalone mmseqs2/CD-HIT clustering)
+- Clustering loader: `scripts/load_clustering.py` (load clustering to database)
+- ECOD status populator: `scripts/populate_ecod_status.py` (clustering-aware status propagation)
 - API specification: `PYECOD_MINI_API_SPEC.md` (contract with pyecod_mini)
 
 ### Test Files
@@ -342,6 +423,7 @@ ls -lh /data/ecod/database_versions/v291/ecod_v291_hhm*
 - Unit tests: `tests/unit/test_batch_manifest.py`
 - Integration tests: `tests/integration/test_blast_workflow.py`, `test_hhsearch_workflow.py`
 - Production test: `scripts/run_small_test.py`
+- Resume helper: `scripts/resume_batch.py` (interactive batch resumption)
 
 ### Data Locations
 
@@ -380,7 +462,8 @@ Max alignments: 5,000
 
 ## Production Validation
 
-Small-scale test results (15 chains from 2025-09-05 release):
+### Small-Scale Test
+Test results (15 chains from 2025-09-05 release):
 ```
 ✓ Peptide filtering: 28 filtered (1.6% of 1,705 chains)
 ✓ BLAST pipeline: 15/15 complete (100%)
@@ -389,6 +472,22 @@ Small-scale test results (15 chains from 2025-09-05 release):
 ✓ Summary generation: 15/15 complete (100%)
 ✓ Partitioning: 15/15 complete (100%)
 ```
+
+### Full-Week Test
+Production run (1,677 chains from 2025-09-05 release):
+```
+✓ BLAST processing: 1,632/1,632 classifiable chains (100%)
+✓ HHsearch processing: 354/410 chains needed (86%, 56 failures)
+✓ Summary generation: 1,632 domain summary XMLs
+✓ Partitioning: 1,485+/1,632 chains (91%+)
+✓ Runtime: ~4.5 hours for full workflow
+```
+
+**Key learnings**:
+- Chain filtering essential for large batches (prevents SLURM array limit errors)
+- Partitioning is CPU-intensive (~1-2 chains/sec on average, slower for complex proteins)
+- Some chains fail partitioning due to parsing errors (logged and marked in manifest)
+- Workflow is fully resumable from any step via manifest
 
 All 9 workflow steps validated and production-ready.
 
@@ -630,6 +729,197 @@ grep 'algorithm.*version' /data/ecod/pdb_updates/batches/*/partitions/*.xml
 # - MAJOR (3.0.0): Breaking API/algorithm changes
 # - MINOR (2.1.0): New features, backward-compatible
 # - PATCH (2.0.1): Bug fixes only
+```
+
+### Sequence Clustering
+
+**Purpose**: Reduce redundancy in BLAST searches by clustering sequences at 70% identity and running BLAST only on cluster representatives.
+
+**Why clustering matters**:
+- Large PDB backfills can contain thousands of chains
+- Many chains are nearly identical (same structure, multiple copies)
+- Clustering reduces BLAST workload by 70-80% (1,632 → ~367 representatives)
+- Representatives inherit ECOD status to cluster members via database propagation
+
+**Architecture**: Clustering is **decoupled from BLAST workflow**
+- Clustering runs independently on FASTA files (O(n²) complexity)
+- Results loaded to database before BLAST submission
+- BLAST workflow queries database to select only representatives
+- Avoids bottlenecks for large-scale backfills
+
+#### Clustering Methods
+
+**mmseqs2** (Recommended for large datasets):
+- Path: `/sw/apps/mmseqs/bin/mmseqs`
+- Fast cascaded clustering algorithm
+- Handles millions of sequences efficiently
+- Output: TSV format (representative_id → member_id)
+- Test results: 1,632 sequences → 367 clusters in ~3 seconds
+
+**CD-HIT** (Traditional method):
+- Path: `/sw/apps/cdhit/cd-hit`
+- Well-established in bioinformatics
+- Better for small-medium datasets (<10K sequences)
+- Output: .clstr format
+- More memory intensive for large datasets
+
+#### Usage
+
+**Step 1: Run clustering** (standalone, before BLAST):
+
+```bash
+# With mmseqs2 (recommended)
+python scripts/run_clustering.py \
+    /data/ecod/pdb_updates/batches/ecod_weekly_20250905/fastas/all_chains.fasta \
+    /data/ecod/pdb_updates/batches/ecod_weekly_20250905/clustering/mmseqs_70pct \
+    --method mmseqs2 \
+    --threshold 0.70 \
+    --threads 16
+
+# With CD-HIT (traditional)
+python scripts/run_clustering.py \
+    all_chains.fasta \
+    clustering/cdhit_70pct \
+    --method cd-hit \
+    --threshold 0.70 \
+    --threads 8
+
+# Submit to SLURM (for very large datasets)
+python scripts/run_clustering.py \
+    all_chains.fasta \
+    clustering/mmseqs_70pct \
+    --method mmseqs2 \
+    --submit \
+    --partition 96GB \
+    --threads 32
+```
+
+**Step 2: Load clustering to database**:
+
+```bash
+# Load mmseqs2 results
+python scripts/load_clustering.py \
+    --cluster-file clustering/mmseqs_70pct_cluster.tsv \
+    --release-date 2025-09-05 \
+    --threshold 0.70 \
+    --method mmseqs2
+
+# Load CD-HIT results
+python scripts/load_clustering.py \
+    --cluster-file clustering/cdhit_70pct.fasta.clstr \
+    --release-date 2025-09-05 \
+    --threshold 0.70 \
+    --method cd-hit
+```
+
+**Step 3: BLAST workflow automatically uses representatives**:
+
+The BLAST workflow queries `pdb_update.chain_status` for chains where:
+- `is_representative = TRUE` (cluster representatives)
+- `ecod_status = 'not_in_ecod'` (needs classification)
+
+After BLAST completes, ECOD status propagates from representatives to cluster members via `scripts/populate_ecod_status.py`.
+
+#### Database Schema
+
+Clustering data stored in `pdb_update` schema:
+
+```sql
+-- Clustering metadata
+CREATE TABLE pdb_update.clustering_run (
+    release_date date PRIMARY KEY,
+    threshold float NOT NULL,
+    method text NOT NULL,  -- 'mmseqs2' or 'cd-hit'
+    total_sequences integer,
+    total_clusters integer,
+    run_date timestamp DEFAULT now()
+);
+
+-- Chain-level clustering assignments
+ALTER TABLE pdb_update.chain_status
+ADD COLUMN is_representative boolean DEFAULT TRUE,
+ADD COLUMN representative_pdb_id text,
+ADD COLUMN representative_chain_id text,
+ADD COLUMN cluster_size integer;
+```
+
+**Propagation logic** (in `populate_ecod_status.py`):
+1. Query ecod_commons for representatives → mark as `in_current_ecod`
+2. Propagate ECOD status to cluster members via `representative_pdb_id/chain_id`
+
+#### Performance Comparison
+
+Test dataset: 1,632 chains from 2025-09-05 release
+
+| Method   | Runtime | Representatives | Compression | Memory |
+|----------|---------|-----------------|-------------|--------|
+| mmseqs2  | ~3s     | 367 (22%)      | 77.5%       | Low    |
+| CD-HIT   | ~8s     | 357 (22%)      | 78.1%       | Medium |
+
+**Key differences**:
+- mmseqs2 slightly more conservative (10 extra clusters)
+- Both achieve ~77-78% compression
+- mmseqs2 scales better for 10K+ sequences
+
+#### Output Files
+
+```
+clustering/
+├── mmseqs_70pct_cluster.tsv      # TSV: rep_id → member_id
+├── mmseqs_70pct_rep_seq.fasta    # Representative sequences only
+├── mmseqs_70pct_all_seqs.fasta   # All sequences (sorted by cluster)
+└── mmseqs_70pct_tmp/             # Temporary files (auto-cleaned)
+```
+
+**TSV format** (mmseqs2):
+```
+9ay5_A	9ay5_A
+9ay5_A	9ay5_B
+9ay5_A	9ay5_C
+9ay5_G	9ay5_G
+9ay5_G	9ay5_H
+```
+
+#### Scripts
+
+- **Clustering**: `scripts/run_clustering.py` - Standalone clustering with mmseqs2/CD-HIT
+- **Database loading**: `scripts/load_clustering.py` - Parse and load clustering to `pdb_update`
+- **Status propagation**: `scripts/populate_ecod_status.py` - Propagate ECOD status from reps to members
+
+#### Validation
+
+```bash
+# Check clustering efficiency
+psql -d ecod_protein -c "
+SELECT
+    release_date,
+    method,
+    total_sequences,
+    total_clusters,
+    ROUND(100.0 * total_clusters / total_sequences, 1) as pct_representatives
+FROM pdb_update.clustering_run
+ORDER BY release_date DESC;
+"
+
+# Verify representative assignments
+psql -d ecod_protein -c "
+SELECT
+    COUNT(*) FILTER (WHERE is_representative) as representatives,
+    COUNT(*) FILTER (WHERE NOT is_representative) as members
+FROM pdb_update.chain_status
+WHERE release_date = '2025-09-05';
+"
+
+# Check ECOD status propagation
+psql -d ecod_protein -c "
+SELECT
+    ecod_status,
+    COUNT(*) FILTER (WHERE is_representative) as reps,
+    COUNT(*) FILTER (WHERE NOT is_representative) as members
+FROM pdb_update.chain_status
+WHERE release_date = '2025-09-05'
+GROUP BY ecod_status;
+"
 ```
 
 ---

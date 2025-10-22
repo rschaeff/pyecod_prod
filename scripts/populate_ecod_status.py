@@ -3,7 +3,7 @@
 Populate ECOD inclusion status from ecod_commons database.
 
 This script queries ecod_commons to determine which chains already exist
-in ECOD and populates the ecod_status, ecod_uid, and ecod_version columns
+in ECOD and populates the ecod_status and ecod_version columns
 in pdb_update.chain_status.
 
 Usage:
@@ -72,7 +72,6 @@ def propagate_ecod_status_to_cluster(cursor, release_date: str) -> int:
     UPDATE pdb_update.chain_status member
     SET
         ecod_status = rep.ecod_status,
-        ecod_uid = rep.ecod_uid,
         ecod_version = rep.ecod_version
     FROM pdb_update.chain_status rep
     WHERE member.representative_pdb_id = rep.pdb_id
@@ -138,7 +137,6 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
                     WHEN d.classification_status = 'classified' THEN 'in_current_ecod'
                     ELSE cs.ecod_status
                 END as new_status,
-                d.ecod_uid,
                 v.version_name
             FROM pdb_update.chain_status cs
             LEFT JOIN ecod_commons.pdb_chain_mappings pcm
@@ -147,7 +145,7 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
             LEFT JOIN ecod_commons.versions v ON d.version_id = v.id
             WHERE (cs.release_date = %s OR %s IS NULL)
               AND cs.ecod_status = 'not_in_ecod'
-              AND d.ecod_uid IS NOT NULL
+              AND d.classification_status = 'classified'
               {clustering_filter}
             ORDER BY cs.pdb_id, cs.chain_id
             """
@@ -167,7 +165,7 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
 
                 for i, row in enumerate(results[:10]):  # Show first 10
                     rep_marker = " [REP]" if row.get('is_representative') else ""
-                    logger.info(f"  {row['pdb_id']}_{row['chain_id']}: {row['current_status']} -> {row['new_status']} (uid: {row['ecod_uid']}){rep_marker}")
+                    logger.info(f"  {row['pdb_id']}_{row['chain_id']}: {row['current_status']} -> {row['new_status']}{rep_marker}")
 
                 if len(results) > 10:
                     logger.info(f"  ... and {len(results) - 10} more")
@@ -207,7 +205,6 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
                     WHEN d.classification_status = 'classified' THEN 'in_current_ecod'
                     ELSE cs.ecod_status
                 END,
-                ecod_uid = d.ecod_uid,
                 ecod_version = v.version_name
             FROM ecod_commons.pdb_chain_mappings pcm
             JOIN ecod_commons.domains d ON pcm.id = d.protein_id
@@ -218,7 +215,7 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
               AND cs.ecod_status = 'not_in_ecod'
               AND d.classification_status = 'classified'
               {clustering_filter}
-            RETURNING cs.pdb_id, cs.chain_id, cs.ecod_status, d.ecod_uid
+            RETURNING cs.pdb_id, cs.chain_id, cs.ecod_status
             """
 
             cursor.execute(sql, (release_date, release_date))
@@ -250,7 +247,7 @@ def populate_ecod_status(release_date: Optional[str] = None, dry_run: bool = Fal
             if results:
                 logger.info("Sample updated chains:")
                 for i, row in enumerate(results[:5]):
-                    logger.info(f"  {row['pdb_id']}_{row['chain_id']}: {row['ecod_status']} (uid: {row['ecod_uid']})")
+                    logger.info(f"  {row['pdb_id']}_{row['chain_id']}: {row['ecod_status']}")
                 if len(results) > 5:
                     logger.info(f"  ... and {len(results) - 5} more")
 
