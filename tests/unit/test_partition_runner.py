@@ -161,7 +161,7 @@ class TestPartitionXMLParsing:
         """Create mock partition XML with version tracking"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as f:
             f.write("""<?xml version="1.0"?>
-<partition algorithm_version="2.0.0">
+<partition algorithm_version="2.0.2">
   <protein pdb_id="8abc" chain_id="A" length="250">
     <coverage>0.88</coverage>
     <domains>
@@ -187,7 +187,7 @@ class TestPartitionXMLParsing:
 
         assert len(domains) == 2
         assert coverage == 0.88
-        assert algo_version == "2.0.0"
+        assert algo_version == "2.0.2"
 
         # Verify first domain
         d1 = domains[0]
@@ -256,7 +256,7 @@ class TestLibraryAPIIntegration:
             sequence_length=250,
             domains=[mock_domain],
             coverage=0.88,
-            algorithm_version="2.0.0",
+            algorithm_version="2.0.2",
             success=True
         )
 
@@ -288,7 +288,7 @@ class TestLibraryAPIIntegration:
                 assert result.domain_count == 1
                 assert result.partition_coverage == 0.88
                 assert result.partition_quality == "good"  # 88% >= 80%
-                assert result.algorithm_version == "2.0.0"
+                assert result.algorithm_version == "2.0.2"
 
                 # Verify library was called
                 mock_partition.assert_called_once()
@@ -323,7 +323,7 @@ class TestCLIFallback:
                 partition_xml = Path(output_dir) / "8abc_A.partition.xml"
                 with open(partition_xml, "w") as f:
                     f.write("""<?xml version="1.0"?>
-<partition algorithm_version="2.0.0">
+<partition algorithm_version="2.0.2">
   <protein pdb_id="8abc" chain_id="A" length="250">
     <coverage>0.75</coverage>
     <domains>
@@ -346,7 +346,7 @@ class TestCLIFallback:
                 assert result.domain_count == 1
                 assert result.partition_coverage == 0.75
                 assert result.partition_quality == "low_coverage"  # 50-80%
-                assert result.algorithm_version == "2.0.0"
+                assert result.algorithm_version == "2.0.2"
 
                 # Verify subprocess was called (once for --version, once for partition)
                 assert mock_subprocess.call_count == 2

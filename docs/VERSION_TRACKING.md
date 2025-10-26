@@ -27,7 +27,7 @@
 
 2. **XML Writer** needs to include version:
    - `write_domain_partition()` should write `algorithm_version` attribute to `<partition>` root element
-   - Use `pyecod_mini.__version__` (currently "2.0.0")
+   - Use `pyecod_mini.__version__` (currently "2.0.2")
 
 3. **CLI** needs to support `--version`:
    - Print version and exit
@@ -44,7 +44,7 @@
 pyECOD Mini - Clean Domain Partitioning Tool
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.2"
 __author__ = "pyECOD Mini Development Team"
 
 # Export library API
@@ -95,7 +95,7 @@ class PartitionResult:
     domains: List[Domain]
     coverage: float  # 0.0-1.0
     partition_xml_path: str
-    algorithm_version: str  # e.g., "2.0.0"
+    algorithm_version: str  # e.g., "2.0.2"
     error_message: Optional[str] = None
 
 
@@ -149,7 +149,7 @@ def partition_protein(
             domains=converted_domains,
             coverage=calculated_coverage,
             partition_xml_path=output_xml,
-            algorithm_version=pyecod_mini.__version__,  # "2.0.0"
+            algorithm_version=pyecod_mini.__version__,  # "2.0.2"
             error_message=None,
         )
 
@@ -203,7 +203,7 @@ pyecod_mini follows semantic versioning: `MAJOR.MINOR.PATCH`
 
 | pyecod_mini | pyecod_prod | Status | Notes |
 |-------------|-------------|--------|-------|
-| 2.0.0       | 1.0.0+      | ✅ Compatible | Current production |
+| 2.0.2       | 1.0.0+      | ✅ Compatible | Current production |
 | 2.1.x       | 1.0.0+      | ✅ Compatible | Minor updates OK |
 | 3.0.0       | 2.0.0+      | ⚠️  Breaking | Requires prod update |
 
@@ -217,7 +217,7 @@ def _check_version_compatibility(self, algorithm_version: str):
     import packaging.version as pv
 
     mini_version = pv.parse(algorithm_version)
-    min_required = pv.parse("2.0.0")
+    min_required = pv.parse("2.0.2")
     max_supported = pv.parse("3.0.0")
 
     if mini_version < min_required:
@@ -256,11 +256,11 @@ def test_version_captured_from_library():
 # Verify version in output XML
 python -m pyecod_mini 8abc_A --summary-xml /path/to/summary.xml --output /tmp/partition.xml
 grep 'algorithm_version' /tmp/partition.xml
-# Should show: algorithm_version="2.0.0"
+# Should show: algorithm_version="2.0.2"
 
 # Verify CLI --version
 pyecod-mini --version
-# Should print: pyecod-mini 2.0.0
+# Should print: pyecod-mini 2.0.2
 ```
 
 ## Migration Plan

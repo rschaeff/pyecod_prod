@@ -167,10 +167,19 @@ else:
 
 ```bash
 BLAST+: /sw/apps/ncbi-blast-2.15.0+/bin/blastp
-HH-suite: /sw/apps/hh-suite/bin/hhsearch
+HH-suite: /sw/apps/hh-suite/bin/hhsearch, /sw/apps/hh-suite/bin/hhblits
 pyecod-mini: /home/rschaeff/.local/bin/pyecod-mini
 mmseqs2: /sw/apps/mmseqs/bin/mmseqs
 CD-HIT: /sw/apps/cdhit/cd-hit
+```
+
+### HHsearch Database (UniRef30)
+
+```bash
+UniRef30 Database: /home/rschaeff/search_libs/UniRef30_2023_02
+  - Already extracted (261GB), accessible from all compute nodes via NFS
+  - No staging required - direct access from all SLURM jobs
+  - Contains: _hhm.ffdata (48GB), _a3m.ffdata (204GB), _cs219.ffdata (8.5GB)
 ```
 
 ### PDB Data Locations
@@ -505,7 +514,7 @@ pyecod_prod generates domain evidence (BLAST + HHsearch), then calls pyecod_mini
 
 ```bash
 # Install pyecod_mini as dependency
-pip install pyecod-mini==1.0.0  # Pin specific version for reproducibility
+pip install pyecod-mini>=2.0.0,<3.0.0  # Use latest v2.x (includes bug fixes)
 
 # Or install from local path during development
 pip install -e /path/to/pyecod_mini
@@ -587,8 +596,8 @@ subprocess.run([
 Track pyecod_mini version in requirements:
 
 ```
-# requirements.txt
-pyecod-mini>=1.0.0,<2.0.0  # Compatible with API spec v1.x
+# pyproject.toml dependencies
+pyecod-mini>=2.0.0,<3.0.0  # Compatible with API spec v2.x
 ```
 
 Verify algorithm version from output XML:
@@ -717,7 +726,7 @@ print(f"Algorithm version: {result.algorithm_version}")
 grep 'algorithm.*version' /data/ecod/pdb_updates/batches/*/partitions/*.xml
 
 # Expected output:
-# <version algorithm="2.0.0" git_commit="..." timestamp="..."/>
+# <version algorithm="2.0.2" git_commit="..." timestamp="..."/>
 ```
 
 **Version Compatibility**:
@@ -924,10 +933,103 @@ GROUP BY ecod_status;
 
 ---
 
+## Historical Backfill (2023-2025)
+
+### Overview
+
+A 2-year backfill project to process 103 weekly PDB releases (2023-10-27 to 2025-10-10), covering 197,777 chains.
+
+**Location**: `/data/ecod/pdb_updates/backfill_2023_2025/blast/`
+
+**Status** (2025-10-23):
+- ✅ BLAST complete (9,656 representatives)
+- 🔄 HHsearch in progress (4,297 chains, ETA: 4-8 hours)
+- 🔄 ecod_curation load 95% complete (8,931/9,365 proteins)
+
+**See**: [docs/BACKFILL_STATUS_REPORT.md](docs/BACKFILL_STATUS_REPORT.md) for complete status.
+
+### Key Statistics
+
+- **Total chains**: 197,777
+- **Classifiable**: 193,119 (97.6%)
+- **In ECOD already**: 51,146 (26.5%)
+- **Need classification**: 141,973 (73.5%)
+- **After 70% clustering**: 16,574 representatives (91.4% reduction)
+- **After ECOD filtering**: 9,656 BLAST targets (95.0% total reduction)
+
+### Workflow
+
+1. **Metadata backfill** (Phase 4a): Load 103 releases to `pdb_update.chain_status`
+2. **Sequence extraction** (Phase 4b): Extract 193,119 sequences to database
+3. **Global clustering** (Phase 4c): mmseqs2 at 70% identity → 16,574 representatives
+4. **Clustering load** (Phase 4d): Load to `pdb_update.clustering_run`
+5. **ECOD status lookup** (Phase 4e): Mark 51,146 chains already in ECOD
+6. **BLAST targets** (Phase 4f): 9,656 representatives not in ECOD
+7. **BLAST workflow** (Phase 4g): ✅ Complete (9,656/9,656 chain + domain)
+8. **HHsearch workflow** (Phase 4h): 🔄 In progress (4,297 chains <90% BLAST coverage)
+9. **ecod_curation load** (Phase 4i): 🔄 95% complete (for examination)
+10. **Structure preprocessing** (Phase 4j): Pending (9,365 chain PDB files)
+11. **Evidence propagation** (Phase 4k): Pending (copy to 176,545 members)
+
+### HHsearch Workflow
+
+**Why HHsearch?**: ~44.5% of representatives (4,297/9,656) have <90% BLAST coverage and need more sensitive profile-to-profile search.
+
+**Two-step process**:
+1. **hhblits**: Build query profile against UniRef30 (10-30 min/chain)
+2. **hhsearch**: Search profile against ECOD HMMs (5-10 min/chain)
+
+**Current run** (2025-10-23):
+- Jobs: 318110-318144 (5 batches)
+- Status: 30 running, 4,267 pending
+- UniRef30: Direct access to `/home/rschaeff/search_libs/UniRef30_2023_02` (no staging)
+- SLURM fix: Array indices 1-N per batch with offset (avoids MaxArraySize=1000 limit)
+
+**Scripts**:
+- `/data/ecod/pdb_updates/backfill_2023_2025/blast/run_hhsearch_twostep.py`
+- `/data/ecod/pdb_updates/backfill_2023_2025/blast/submit_hhsearch_batch[2-5].sh`
+- `/data/ecod/pdb_updates/backfill_2023_2025/blast/submit_hhsearch_fixed.sh` (wrapper)
+
+**See**: [docs/HHSEARCH_WORKFLOW.md](docs/HHSEARCH_WORKFLOW.md) for complete documentation.
+
+### Monitor Progress
+
+```bash
+# Check HHsearch jobs
+squeue -u $USER --name=hhsearch*
+
+# Count outputs
+cd /data/ecod/pdb_updates/backfill_2023_2025/blast
+ls profiles/*.a3m | wc -l   # hhblits profiles
+ls hhsearch/*.hhr | wc -l   # HHsearch results
+
+# Check database load
+export ECOD_DB_PASSWORD='ecod#badmin'
+psql -h dione -p 45000 -U ecod -d ecod_protein -c \
+  "SELECT COUNT(*) FROM ecod_curation.protein;"
+
+# Check for failures
+sacct -u $USER --name=hhsearch* --state=FAILED
+```
+
+### Next Steps
+
+After HHsearch completes:
+1. Process HHR files and regenerate summaries (BLAST + HHsearch combined)
+2. Re-run partitioning for chains with updated evidence
+3. Examine results in ecod_curation schema
+4. Propagate evidence to cluster members (176,545 chains)
+5. Load final results to `pdb_update` schema
+
+---
+
 ## References
 
 - [PYECOD_MINI_API_SPEC.md](PYECOD_MINI_API_SPEC.md) - Formal API contract with pyecod_mini
 - [docs/VERSION_TRACKING.md](docs/VERSION_TRACKING.md) - Implementation roadmap for versioning
+- [docs/BACKFILL_STATUS_REPORT.md](docs/BACKFILL_STATUS_REPORT.md) - 2-year backfill status
+- [docs/HHSEARCH_WORKFLOW.md](docs/HHSEARCH_WORKFLOW.md) - HHsearch workflow documentation
+- [docs/CLUSTERING_INTEGRATION_STATUS.md](docs/CLUSTERING_INTEGRATION_STATUS.md) - Clustering workflow
 - [docs/sessions/SESSION_SUMMARY_20251019.md](docs/sessions/SESSION_SUMMARY_20251019.md) - Recent feature implementation
 - pyecod_mini repository: `/home/rschaeff/dev/pyecod_mini/`
 - ECOD database: https://prodata.swmed.edu/ecod/

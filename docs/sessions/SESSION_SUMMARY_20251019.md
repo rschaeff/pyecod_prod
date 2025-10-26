@@ -311,8 +311,8 @@ Implemented comprehensive version tracking for algorithm reproducibility:
 **pyecod_mini Updates:**
 - `src/pyecod_mini/core/writer.py` (line 25-42)
   - Updated `get_git_version()` to prioritize package version
-  - Now returns `pyecod_mini.__version__` ("2.0.0")
-  - Partition XML includes `algorithm_version="2.0.0"`
+  - Now returns `pyecod_mini.__version__` ("2.0.2")
+  - Partition XML includes `algorithm_version="2.0.2"`
 
 **pyecod_prod Readiness:**
 - Already captures `algorithm_version` in PartitionResult (line 56)
@@ -386,7 +386,7 @@ python -c "from pyecod_prod.utils.family_lookup import load_family_lookup_for_ve
 # Verify algorithm version in partition XML (after batch completes)
 grep 'algorithm_version' /data/ecod/pdb_updates/batches/*/partitions/*.xml
 
-# Expected: algorithm_version="2.0.0"
+# Expected: algorithm_version="2.0.2"
 
 # Run updated tests
 pytest tests/integration/test_blast_workflow.py -v
@@ -479,7 +479,7 @@ class PartitionResult:
     domains: List[Domain]
     coverage: float  # 0.0-1.0
     partition_xml_path: str
-    algorithm_version: str  # "2.0.0"
+    algorithm_version: str  # "2.0.2"
     error_message: Optional[str] = None
 ```
 
@@ -507,13 +507,13 @@ print(f"Algorithm: {result.algorithm_version}")
 #### 3. CLI Version Support
 **Modified: `src/pyecod_mini/cli/main.py`**
 - Added `--version` argument to parser
-- Displays `pyecod-mini 2.0.0`
+- Displays `pyecod-mini 2.0.2`
 - Standard CLI convention
 
 **Usage:**
 ```bash
 pyecod-mini --version
-# Output: pyecod-mini 2.0.0
+# Output: pyecod-mini 2.0.2
 ```
 
 #### 4. Integration Validation
@@ -523,8 +523,8 @@ Tested complete integration chain:
 ```bash
 ✅ Library API imports successfully
 ✅ All exports available (partition_protein, PartitionResult, etc.)
-✅ CLI --version returns "pyecod-mini 2.0.0"
-✅ Version tracking returns package version "2.0.0"
+✅ CLI --version returns "pyecod-mini 2.0.2"
+✅ Version tracking returns package version "2.0.2"
 ✅ pyecod_prod detects library: LIBRARY_AVAILABLE = True
 ✅ Writer uses package version (not git version)
 ```
@@ -559,7 +559,7 @@ print(f'Version: {partition_protein.__module__}.{partition_protein.__name__}')
 
 # Test CLI version
 PYTHONPATH=/home/rschaeff/dev/pyecod_mini/src:$PYTHONPATH python -m pyecod_mini --version
-# Expected: pyecod-mini 2.0.0
+# Expected: pyecod-mini 2.0.2
 
 # Test integration
 PYTHONPATH=/home/rschaeff/dev/pyecod_mini/src:/home/rschaeff/dev/pyecod_prod/src:$PYTHONPATH python -c "
@@ -574,7 +574,7 @@ from pyecod_mini.core.writer import get_git_version
 import pyecod_mini
 print(f'Package: {pyecod_mini.__version__}')
 print(f'Writer: {get_git_version()}')
-# Expected: Both return 2.0.0
+# Expected: Both return 2.0.2
 "
 ```
 

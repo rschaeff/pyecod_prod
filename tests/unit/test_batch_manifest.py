@@ -207,7 +207,7 @@ class TestBatchManifest:
             assert chain["partition_coverage"] == 0.88
             assert chain["domain_count"] == 2
             assert chain["partition_quality"] == "good"
-            assert chain["algorithm_version"] == "2.0.0"
+            assert chain["algorithm_version"] == "2.0.2"
             assert "partition_complete_time" in chain
             assert "partition" in chain["files"]
 
@@ -258,7 +258,7 @@ class TestBatchManifest:
                     partition_coverage=coverage,
                     domain_count=count,
                     partition_quality=quality,
-                    algorithm_version="2.0.0",
+                    algorithm_version="2.0.2",
                 )
 
                 chain_key = f"{pdb_id}_{chain_id}"
