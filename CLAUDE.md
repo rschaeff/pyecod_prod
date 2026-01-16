@@ -20,6 +20,7 @@ The domain partitioning algorithm lives in the separate **pyecod_mini** reposito
 
 **pyecod_prod** (this repo):
 - ✅ PDB data acquisition and parsing
+- ✅ Designed protein detection and filtering
 - ✅ Sequence clustering (mmseqs2/CD-HIT) for redundancy reduction
 - ✅ BLAST/HHsearch execution via SLURM
 - ✅ Evidence generation (domain_summary.xml)
@@ -418,6 +419,7 @@ ls -lh /data/ecod/database_versions/v291/ecod_v291_hhm*
 - Main orchestrator: `src/pyecod_prod/batch/weekly_batch.py`
 - Manifest manager: `src/pyecod_prod/batch/manifest.py`
 - PDB parser: `src/pyecod_prod/parsers/pdb_status.py`
+- Designed protein detector: `src/pyecod_prod/utils/designed_proteins.py`
 - BLAST runner: `src/pyecod_prod/slurm/blast_runner.py`
 - HHsearch runner: `src/pyecod_prod/slurm/hhsearch_runner.py`
 - Summary generator: `src/pyecod_prod/core/summary_generator.py`
@@ -431,6 +433,7 @@ ls -lh /data/ecod/database_versions/v291/ecod_v291_hhm*
 
 - Unit tests: `tests/unit/test_batch_manifest.py`
 - Integration tests: `tests/integration/test_blast_workflow.py`, `test_hhsearch_workflow.py`
+- Designed protein tests: `tests/test_designed_proteins.py`
 - Production test: `scripts/run_small_test.py`
 - Resume helper: `scripts/resume_batch.py` (interactive batch resumption)
 
@@ -739,6 +742,99 @@ grep 'algorithm.*version' /data/ecod/pdb_updates/batches/*/partitions/*.xml
 # - MINOR (2.1.0): New features, backward-compatible
 # - PATCH (2.0.1): Bug fixes only
 ```
+
+### Designed Protein Filter (January 2026)
+
+**Purpose**: Detect and filter computationally designed/synthetic proteins from classification pipeline, as ECOD focuses on naturally evolved proteins.
+
+**Rationale**: Designed proteins (de novo designs, miniproteins, Rosetta/RFdiffusion outputs) have artificial folds that don't fit the evolutionary classification model. They should be identified early and excluded from classification.
+
+**Detection Markers** (scoring system):
+
+| Marker | Score | Example |
+|--------|-------|---------|
+| Source organism: "synthetic construct" | +3 | Entity source in mmCIF |
+| Keyword: "DE NOVO PROTEIN" | +3 | PDB keywords field |
+| Title: "de novo" | +2 | "De novo designed protein..." |
+| Title: design method (Rosetta, RFdiffusion, etc.) | +2 | "Rosetta designed scaffold" |
+| Title: "miniprotein", "minibinder" | +2 | Baker lab designs |
+| Title: "designed" (alone) | +1 | May need manual review |
+
+**Confidence Levels**:
+- **HIGH** (score ≥3): Almost certainly designed → auto-exclude
+- **MEDIUM** (score 1-2): Likely designed → may need review
+- **NONE** (score 0): Not detected as designed → classify normally
+
+**Implementation**:
+- Module: `src/pyecod_prod/utils/designed_proteins.py`
+- Integration: `PDBStatusParser` checks during chain extraction
+- Configurable: Can disable or adjust confidence threshold
+
+**Usage**:
+
+```python
+from pyecod_prod.utils.designed_proteins import (
+    DesignedProteinDetector,
+    is_designed_protein,
+    get_designed_protein_info,
+)
+
+# Quick check
+if is_designed_protein("9hnh"):
+    print("This is a designed protein")
+
+# Detailed info
+result = get_designed_protein_info("9r0t")
+print(f"Score: {result.score}, Confidence: {result.confidence}")
+print(f"Reasons: {result.reasons}")
+# Output: Score: 9, Confidence: HIGH
+# Reasons: ['synthetic_construct_organism', 'de_novo_keyword', 'de_novo_title']
+
+# Batch filtering
+detector = DesignedProteinDetector()
+natural, designed = detector.filter_designed(pdb_ids)
+```
+
+**Integration with PDBStatusParser**:
+
+```python
+from pyecod_prod.parsers.pdb_status import PDBStatusParser
+
+# Default: filter high-confidence designed proteins
+parser = PDBStatusParser(
+    filter_designed_proteins=True,
+    designed_protein_confidence="high",  # "high", "medium", or "none"
+)
+
+result = parser.process_weekly_release("/usr2/pdb/data/status/20260102")
+print(f"Designed proteins filtered: {len(result['designed'])} chains")
+```
+
+**CLI Options**:
+
+```bash
+# Disable filtering
+python -m pyecod_prod.parsers.pdb_status /path/to/status --no-filter-designed
+
+# Also filter medium-confidence
+python -m pyecod_prod.parsers.pdb_status /path/to/status --designed-confidence medium
+```
+
+**Validation**:
+
+```bash
+# Run tests
+pytest tests/test_designed_proteins.py -v
+
+# Test on known designed protein
+python -c "
+from pyecod_prod.utils.designed_proteins import get_designed_protein_info
+result = get_designed_protein_info('9hnh')
+print(f'{result.pdb_id}: {result.confidence.value}, score={result.score}')
+print(f'Reasons: {result.reasons}')"
+```
+
+**Note**: The `_entity.src_method='syn'` field in mmCIF is NOT reliable for designed protein detection. It indicates "contains synthetic component" (which includes synthetic ligands, peptides, etc.) rather than "designed protein". The Q4 2025 batch showed only 109 overlap between 1,171 PDBs with `syn` tag and 127 PDBs with "synthetic construct" organism.
 
 ### Sequence Clustering
 

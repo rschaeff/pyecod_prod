@@ -13,6 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from pyecod_prod.utils.pdb_ids import (
+    extract_pdb_id_from_line,
+    get_directory_hash,
+    is_valid_pdb_id,
+)
+from pyecod_prod.utils.designed_proteins import (
+    DesignedProteinDetector,
+    DesignedProteinConfidence,
+)
+
 try:
     from Bio.PDB import MMCIFParser
     from Bio.PDB.Polypeptide import is_aa
@@ -59,6 +69,8 @@ class PDBStatusParser:
         self,
         pdb_mirror_path: str = "/usr2/pdb/data/structures/divided/mmCIF",
         peptide_threshold: int = 20,
+        filter_designed_proteins: bool = True,
+        designed_protein_confidence: str = "high",
     ):
         """
         Initialize PDB status parser.
@@ -66,9 +78,16 @@ class PDBStatusParser:
         Args:
             pdb_mirror_path: Path to local PDB mmCIF mirror
             peptide_threshold: Minimum length for classifiable protein chain
+            filter_designed_proteins: If True, filter out designed/synthetic proteins
+            designed_protein_confidence: Confidence level for filtering:
+                - "high": Only filter high-confidence designed proteins (default)
+                - "medium": Also filter medium-confidence designed proteins
+                - "none": Don't filter designed proteins
         """
         self.pdb_mirror_path = Path(pdb_mirror_path)
         self.peptide_threshold = peptide_threshold
+        self.filter_designed_proteins = filter_designed_proteins
+        self.designed_protein_confidence = designed_protein_confidence
 
         if not HAS_BIOPYTHON:
             raise ImportError(
@@ -77,6 +96,17 @@ class PDBStatusParser:
             )
 
         self.parser = MMCIFParser(QUIET=True)
+
+        # Initialize designed protein detector if filtering is enabled
+        if self.filter_designed_proteins:
+            self.designed_detector = DesignedProteinDetector(
+                pdb_mirror_path=pdb_mirror_path,
+            )
+            # Cache for designed protein results per PDB
+            self._designed_cache: Dict[str, DesignedProteinConfidence] = {}
+        else:
+            self.designed_detector = None
+            self._designed_cache = {}
 
     def get_weekly_additions(self, status_dir: str) -> List[str]:
         """
@@ -96,12 +126,10 @@ class PDBStatusParser:
         pdb_ids = []
         with open(added_file) as f:
             for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    # Extract PDB ID (first 4 characters)
-                    pdb_id = line[:4].lower()
-                    if len(pdb_id) == 4:
-                        pdb_ids.append(pdb_id)
+                # Extract PDB ID using flexible parser (supports legacy and extended formats)
+                pdb_id = extract_pdb_id_from_line(line)
+                if pdb_id:
+                    pdb_ids.append(pdb_id)
 
         return pdb_ids
 
@@ -124,11 +152,10 @@ class PDBStatusParser:
         pdb_ids = []
         with open(modified_file) as f:
             for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    pdb_id = line[:4].lower()
-                    if len(pdb_id) == 4:
-                        pdb_ids.append(pdb_id)
+                # Extract PDB ID using flexible parser (supports legacy and extended formats)
+                pdb_id = extract_pdb_id_from_line(line)
+                if pdb_id:
+                    pdb_ids.append(pdb_id)
 
         return pdb_ids
 
@@ -136,17 +163,20 @@ class PDBStatusParser:
         """
         Get path to mmCIF file for a PDB ID.
 
+        Supports both legacy 4-character and extended 12-character PDB IDs.
+        Directory structure uses appropriate hash based on ID format.
+
         Args:
-            pdb_id: PDB ID (will be converted to lowercase)
+            pdb_id: PDB ID (legacy or extended format)
 
         Returns:
             Path to mmCIF file
         """
         pdb_id = pdb_id.lower()
-        # mmCIF files are organized as: /path/to/mmCIF/ab/1abc.cif.gz or 1abc.cif
-        middle_letters = pdb_id[1:3]
-        cif_file = self.pdb_mirror_path / middle_letters / f"{pdb_id}.cif"
-        cif_gz_file = self.pdb_mirror_path / middle_letters / f"{pdb_id}.cif.gz"
+        # Get directory hash (handles both legacy and extended formats)
+        dir_hash = get_directory_hash(pdb_id)
+        cif_file = self.pdb_mirror_path / dir_hash / f"{pdb_id}.cif"
+        cif_gz_file = self.pdb_mirror_path / dir_hash / f"{pdb_id}.cif.gz"
 
         if cif_gz_file.exists():
             return cif_gz_file
@@ -207,7 +237,7 @@ class PDBStatusParser:
                 sequence_length = len(sequence_str)
 
                 # Determine if classifiable
-                can_classify, reason = self._is_classifiable(sequence_str, sequence_length)
+                can_classify, reason = self._is_classifiable(sequence_str, sequence_length, pdb_id)
 
                 chain_info = ChainInfo(
                     pdb_id=pdb_id.lower(),
@@ -222,13 +252,44 @@ class PDBStatusParser:
 
         return chains
 
-    def _is_classifiable(self, sequence: str, length: int) -> Tuple[bool, Optional[str]]:
+    def _check_designed_protein(self, pdb_id: str) -> DesignedProteinConfidence:
+        """
+        Check if a PDB entry is a designed protein.
+
+        Args:
+            pdb_id: PDB identifier
+
+        Returns:
+            DesignedProteinConfidence level
+        """
+        if not self.filter_designed_proteins or self.designed_detector is None:
+            return DesignedProteinConfidence.NONE
+
+        pdb_id = pdb_id.lower()
+
+        # Check cache
+        if pdb_id in self._designed_cache:
+            return self._designed_cache[pdb_id]
+
+        # Detect designed protein
+        result = self.designed_detector.detect(pdb_id)
+        self._designed_cache[pdb_id] = result.confidence
+
+        return result.confidence
+
+    def _is_classifiable(
+        self,
+        sequence: str,
+        length: int,
+        pdb_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
         """
         Determine if a chain can be classified.
 
         Args:
             sequence: Amino acid sequence
             length: Sequence length
+            pdb_id: PDB identifier (for designed protein check)
 
         Returns:
             (can_classify, reason) - reason is None if classifiable
@@ -236,6 +297,19 @@ class PDBStatusParser:
         # Check length - peptides are too short
         if length < self.peptide_threshold:
             return False, "peptide"
+
+        # Check for designed proteins (if enabled and pdb_id provided)
+        if pdb_id and self.filter_designed_proteins:
+            confidence = self._check_designed_protein(pdb_id)
+
+            # Filter based on confidence level setting
+            if self.designed_protein_confidence == "high":
+                if confidence == DesignedProteinConfidence.HIGH:
+                    return False, "designed_protein"
+            elif self.designed_protein_confidence == "medium":
+                if confidence in (DesignedProteinConfidence.HIGH, DesignedProteinConfidence.MEDIUM):
+                    return False, "designed_protein"
+            # If "none", don't filter designed proteins
 
         # Could add more filters here:
         # - Check for unusual amino acid composition
@@ -255,11 +329,13 @@ class PDBStatusParser:
             Dict with keys:
                 - 'classifiable': Chains that can be classified
                 - 'peptides': Chains too short (< threshold)
+                - 'designed': Designed/synthetic proteins (excluded from classification)
                 - 'other': Other non-classifiable chains
         """
         result = {
             "classifiable": [],
             "peptides": [],
+            "designed": [],
             "other": [],
         }
 
@@ -268,6 +344,8 @@ class PDBStatusParser:
                 result["classifiable"].append(chain)
             elif chain.cannot_classify_reason == "peptide":
                 result["peptides"].append(chain)
+            elif chain.cannot_classify_reason == "designed_protein":
+                result["designed"].append(chain)
             else:
                 result["other"].append(chain)
 
@@ -286,6 +364,7 @@ class PDBStatusParser:
                 - chains: All ChainInfo objects
                 - classifiable: Classifiable chains
                 - peptides: Peptide chains
+                - designed: Designed/synthetic protein chains
                 - other: Other non-classifiable chains
                 - failed: PDB IDs that failed to parse
         """
@@ -294,6 +373,11 @@ class PDBStatusParser:
         # Get PDB IDs from status files
         pdb_ids = self.get_weekly_additions(status_dir)
         print(f"Found {len(pdb_ids)} new PDB entries")
+
+        if self.filter_designed_proteins:
+            print(f"Designed protein filter: enabled (confidence={self.designed_protein_confidence})")
+        else:
+            print("Designed protein filter: disabled")
 
         # Process each PDB entry
         all_chains = []
@@ -313,6 +397,8 @@ class PDBStatusParser:
         print(f"Total chains: {len(all_chains)}")
         print(f"  Classifiable: {len(filtered['classifiable'])}")
         print(f"  Peptides: {len(filtered['peptides'])}")
+        if self.filter_designed_proteins:
+            print(f"  Designed proteins: {len(filtered['designed'])}")
         print(f"  Other: {len(filtered['other'])}")
         print(f"  Failed to parse: {len(failed)}")
 
@@ -321,6 +407,7 @@ class PDBStatusParser:
             "chains": all_chains,
             "classifiable": filtered["classifiable"],
             "peptides": filtered["peptides"],
+            "designed": filtered["designed"],
             "other": filtered["other"],
             "failed": failed,
         }
@@ -334,12 +421,17 @@ def main():
     parser.add_argument("status_dir", help="Path to weekly status directory (e.g., /usr2/pdb/data/status/20251010)")
     parser.add_argument("--pdb-mirror", default="/usr2/pdb/data/structures/divided/mmCIF", help="Path to PDB mmCIF mirror")
     parser.add_argument("--peptide-threshold", type=int, default=20, help="Minimum chain length for classification")
+    parser.add_argument("--no-filter-designed", action="store_true", help="Disable designed protein filtering")
+    parser.add_argument("--designed-confidence", choices=["high", "medium", "none"], default="high",
+                        help="Confidence level for designed protein filtering (default: high)")
 
     args = parser.parse_args()
 
     status_parser = PDBStatusParser(
         pdb_mirror_path=args.pdb_mirror,
         peptide_threshold=args.peptide_threshold,
+        filter_designed_proteins=not args.no_filter_designed,
+        designed_protein_confidence=args.designed_confidence,
     )
 
     result = status_parser.process_weekly_release(args.status_dir)
@@ -348,6 +440,18 @@ def main():
     print("\nSample classifiable chains:")
     for chain in result["classifiable"][:10]:
         print(f"  {chain.pdb_id}_{chain.chain_id}: {chain.sequence_length} residues")
+
+    # Print designed proteins if any were filtered
+    if result["designed"]:
+        print(f"\nDesigned proteins filtered ({len(result['designed'])} chains):")
+        # Group by PDB ID
+        by_pdb = {}
+        for chain in result["designed"]:
+            if chain.pdb_id not in by_pdb:
+                by_pdb[chain.pdb_id] = []
+            by_pdb[chain.pdb_id].append(chain.chain_id)
+        for pdb_id, chains in list(by_pdb.items())[:10]:
+            print(f"  {pdb_id}: chains {', '.join(chains)}")
 
 
 if __name__ == "__main__":
