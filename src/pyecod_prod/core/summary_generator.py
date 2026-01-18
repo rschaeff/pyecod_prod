@@ -30,6 +30,8 @@ class BlastHit:
     bitscore: float
     identity: float  # Sequence identity (0.0-1.0)
     alignment_length: int
+    ecod_uid: Optional[int] = None  # ECOD unique ID (for uid-based reference lookup)
+    reference_length: Optional[int] = None  # Full length of reference domain
 
 
 @dataclass
@@ -45,6 +47,8 @@ class HHsearchHit:
     evalue: float
     probability: float  # HHsearch probability (0-100)
     score: float
+    ecod_uid: Optional[int] = None  # ECOD unique ID (for uid-based reference lookup)
+    reference_length: Optional[int] = None  # Full length of reference domain
 
 
 class SummaryGenerator:
@@ -118,9 +122,11 @@ class SummaryGenerator:
                     if source == "chain_blast":
                         # Chain BLAST: extract "pdb_id chain_id" from Hit_def
                         domain_id = self._extract_chain_id(hit_def)
+                        ecod_uid = None  # Chain BLAST doesn't have uid
                     else:
-                        # Domain BLAST: extract ECOD domain ID
+                        # Domain BLAST: extract ECOD domain ID and uid
                         domain_id = self._extract_domain_id(hit_id, hit_def)
+                        ecod_uid = self._extract_ecod_uid(hit_def)
 
                     if not domain_id:
                         continue
@@ -180,6 +186,8 @@ class SummaryGenerator:
                             bitscore=bitscore,
                             identity=identity,
                             alignment_length=align_len,
+                            ecod_uid=ecod_uid,
+                            reference_length=hit_len if hit_len > 0 else None,
                         )
 
                         hits.append(blast_hit)
@@ -222,27 +230,76 @@ class SummaryGenerator:
         Extract ECOD domain ID from BLAST hit.
 
         Args:
-            hit_id: Hit ID from BLAST
-            hit_def: Hit definition line
+            hit_id: Hit ID from BLAST (may be gnl|BL_ORD_ID|... internal ID)
+            hit_def: Hit definition line containing actual domain ID
 
         Returns:
             ECOD domain ID or None
+
+        Supported formats:
+            - Traditional ECOD: "e6rw9A2 uid:2546239 range:... assignment:..."
+            - UniProt-based (v293.1+): "B6A877_nD3 uid:4312072 range:... assignment:..."
+            - Legacy chain format: "8abc_A e8abcA1,e8abcA2"
         """
-        # Try hit_id first (often the domain ID for domain BLAST)
-        if hit_id.startswith("e") and len(hit_id) > 5:
-            # Looks like ECOD domain ID (e.g., e2ia4A1)
+        # First, check if hit_id is a valid ECOD domain ID (legacy format)
+        if hit_id.startswith("e") and len(hit_id) > 5 and not hit_id.startswith("gnl|"):
             return hit_id
 
-        # Try extracting from definition
-        # Format: "8abc_A e8abcA1,e8abcA2" or just "e2ia4A1"
+        # Extract first word from hit_def - this is the domain ID
+        # Works for both traditional (e6rw9A2) and UniProt (B6A877_D3) formats
         parts = hit_def.split()
-        for part in parts:
-            if part.startswith("e") and len(part) > 5:
-                # Could be comma-separated list
-                return part
+        if parts:
+            domain_id = parts[0]
+            # Validate it looks like a domain ID (not just noise)
+            # Traditional: e6rw9A2 (starts with 'e', alphanumeric)
+            # UniProt: {UNP_ID}_D{num} (e.g., B6A877_D3, A0A1P8B6J1_D1)
+            if domain_id.startswith("e") and len(domain_id) > 5:
+                return domain_id
+            elif "_D" in domain_id or "_nD" in domain_id:
+                # UniProt-based domain ID (e.g., B6A877_D3, B6A877_nD3)
+                return domain_id
+            elif len(domain_id) > 3 and domain_id[0].isalnum():
+                # Generic alphanumeric ID - accept it
+                return domain_id
 
-        # Fallback: use hit_id as-is
-        return hit_id
+        # Fallback: use hit_id only if it's not an internal BLAST ID
+        if not hit_id.startswith("gnl|BL_ORD_ID"):
+            return hit_id
+
+        # Last resort: return first word of hit_def anyway
+        return parts[0] if parts else None
+
+    def _extract_ecod_uid(self, hit_def: str) -> Optional[int]:
+        """
+        Extract ECOD unique ID (uid) from BLAST hit definition.
+
+        Handles two formats:
+        1. Tagged format: "B6A877_nD3 uid:4312072 range:... assignment:..."
+        2. v293 format: "e6rw9E2 E:21-80,E:100-297,... 002546267" (uid is last token)
+
+        Args:
+            hit_def: Hit definition line
+
+        Returns:
+            ECOD uid as integer, or None if not found
+        """
+        import re
+
+        # Format 1: Tagged pattern "uid:DIGITS" (e.g., "uid:4312072")
+        match = re.search(r'uid:(\d+)', hit_def)
+        if match:
+            return int(match.group(1))
+
+        # Format 2: v293 format - uid is last token and is numeric (zero-padded)
+        # e.g., "e6rw9E2 E:21-80,E:100-297,E:446-1066,E:1736-1937 002546267"
+        parts = hit_def.split()
+        if len(parts) >= 2:
+            last_token = parts[-1]
+            # Check if last token is purely numeric (zero-padded uid)
+            if last_token.isdigit():
+                return int(last_token)
+
+        return None
 
     def parse_hhsearch_hhr(self, hhr_file: str, source: str) -> List[HHsearchHit]:
         """
@@ -409,6 +466,11 @@ class SummaryGenerator:
         hit_elem.set("coverage", f"{hit.reference_coverage:.2f}")
         hit_elem.set("query_range", hit.query_range)
         hit_elem.set("target_range", hit.target_range)
+        # Add uid and reference_length for uid-based lookups
+        if hit.ecod_uid is not None:
+            hit_elem.set("ecod_uid", str(hit.ecod_uid))
+        if hit.reference_length is not None:
+            hit_elem.set("reference_length", str(hit.reference_length))
 
     def _add_hhsearch_hit(self, evidence: ET.Element, hit: HHsearchHit):
         """
@@ -427,6 +489,11 @@ class SummaryGenerator:
         hit_elem.set("score", f"{hit.score:.1f}")
         hit_elem.set("query_range", hit.query_range)
         hit_elem.set("target_range", hit.target_range)
+        # Add uid and reference_length for uid-based lookups
+        if hit.ecod_uid is not None:
+            hit_elem.set("ecod_uid", str(hit.ecod_uid))
+        if hit.reference_length is not None:
+            hit_elem.set("reference_length", str(hit.reference_length))
 
     def _write_pretty_xml(self, root: ET.Element, output_path: str):
         """
