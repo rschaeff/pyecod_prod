@@ -468,8 +468,9 @@ class ClusterPropagator:
         """
         import re
 
-        # Pattern matches chain prefix like "A:" or "BA:"
-        pattern = r'^([A-Za-z]+):'
+        # Pattern matches chain prefix like "A:", "BA:", "A4:", "f9:", "0:"
+        # Chain IDs in mmCIF can be alphanumeric (label_asym_id)
+        pattern = r'^([A-Za-z0-9]+):'
 
         parts = rep_range.split(',')
         transformed = []
