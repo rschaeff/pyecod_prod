@@ -44,6 +44,8 @@ class WeeklyBatch:
         pdb_status_dir: str,
         base_path: str = DEFAULT_BASE_PATH,
         reference_version: str = "develop291",
+        chain_db: Optional[str] = None,
+        domain_db: Optional[str] = None,
     ):
         """
         Initialize weekly batch processor.
@@ -53,6 +55,8 @@ class WeeklyBatch:
             pdb_status_dir: Path to PDB status directory
             base_path: Base path for batch directories
             reference_version: ECOD reference version
+            chain_db: Override default chain BLAST database path
+            domain_db: Override default domain BLAST database path
         """
         # Normalize release date
         self.release_date = release_date.replace("-", "")  # YYYYMMDD format
@@ -68,7 +72,11 @@ class WeeklyBatch:
 
         # Initialize components
         self.pdb_parser = PDBStatusParser()
-        self.blast_runner = BlastRunner(reference_version=reference_version)
+        self.blast_runner = BlastRunner(
+            reference_version=reference_version,
+            chain_db=chain_db,
+            domain_db=domain_db,
+        )
         self.hhsearch_runner = HHsearchRunner(reference_version=reference_version)
 
         # Load family lookup for summary generation

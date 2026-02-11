@@ -58,22 +58,22 @@ def main():
         description="Sync batch manifests to PostgreSQL database"
     )
 
-    # Database connection
+    # Database connection (defaults to production on dione)
     parser.add_argument(
         "--host",
-        default="localhost",
-        help="Database host (default: localhost)"
+        default="dione",
+        help="Database host (default: dione)"
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=5432,
-        help="Database port (default: 5432)"
+        default=45000,
+        help="Database port (default: 45000)"
     )
     parser.add_argument(
         "--database",
-        default="update_protein",
-        help="Database name (default: update_protein)"
+        default="ecod_protein",
+        help="Database name (default: ecod_protein)"
     )
     parser.add_argument(
         "--user",
@@ -118,7 +118,7 @@ def main():
         "port": args.port,
         "database": args.database,
         "user": args.user,
-        "password": None  # Will use .pgpass or other auth
+        "password": "ecod#badmin"
     }
 
     try:

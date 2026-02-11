@@ -1,12 +1,35 @@
 # HHsearch Workflow for PDB Backfill
 
-This document describes the staged HHsearch workflow for the 2023-2025 PDB backfill project.
+This document describes the HHsearch workflow for the 2023-2025 PDB backfill project.
+
+## Current Status (2025-10-25)
+
+**✅ HHSEARCH COMPLETE - 94% SUCCESS RATE**
+
+- **Completed**: 4,038 chains (94.0%)
+- **Failed (timeouts)**: 259 chains (6.0%)
+- **Jobs**: 318110, 318141-318144 (5 batches)
+- **Runtime**: ~6-7 hours (2025-10-23 22:36 to 2025-10-24 ~05:00 CDT)
+
+**Failure Analysis**:
+- All 259 failures were hhblits timeouts (30-minute limit)
+- Failed chains significantly longer than successful:
+  - Failed: mean 1,244 residues, range 83-4,629
+  - Successful: mean 241 residues, range 20-2,032
+- Top 10 failures: 4,000-4,629 residues (very large multi-domain proteins)
+
+**Post-Processing** (2025-10-25):
+- Regenerating 4,038 summaries with BLAST + HHsearch evidence (Job 322407)
+- Re-running partitioning with enhanced evidence
+- Results saved to separate directories for comparison:
+  - `summaries_with_hhsearch/`
+  - `partitions_with_hhsearch/`
 
 ## Overview
 
 The HHsearch workflow implements a **two-pass search strategy**:
-1. **BLAST** (fast, less sensitive) - COMPLETED
-2. **HHsearch** (slow, more sensitive) - For chains with <90% BLAST coverage
+1. **BLAST** (fast, less sensitive) - ✅ COMPLETED
+2. **HHsearch** (slow, more sensitive) - 🔄 IN PROGRESS (for chains with <90% BLAST coverage)
 
 ## Coverage Analysis Results
 
@@ -21,19 +44,15 @@ From 9,656 cluster representatives (not in ECOD):
 
 Average BLAST coverage: 61.7%
 
-## Architecture: Staged Workflow
+## Architecture: Direct Database Access
 
 HHsearch requires a large UniRef30 database (~261GB uncompressed) for profile building.
-To avoid staging overhead per-job, we use a **decoupled 3-phase approach**:
 
-### Phase 1: Database Staging
-Copy UniRef30 to /tmp on select nodes with adequate disk space (≥300GB)
+**Database location**: `/home/rschaeff/search_libs/UniRef30_2023_02`
 
-### Phase 2: Profile Building + Search
-Run hhblits (profile) + hhsearch (search) ONLY on staged nodes
-
-### Phase 3: Database Destaging
-Clean up UniRef30 from /tmp after all jobs complete
+The database is already extracted and stored on network-shared storage accessible from
+all compute nodes. **No staging required** - jobs use the database directly from this
+location, which is mounted on all nodes via NFS.
 
 ## Files and Scripts
 
@@ -44,81 +63,39 @@ Clean up UniRef30 from /tmp after all jobs complete
 
 ### Scripts
 1. `run_hhsearch_twostep.py` - Core HHsearch script (hhblits + hhsearch)
-2. `stage_uniref_to_nodes.sh` - Stage UniRef30 to compute nodes
-3. `submit_hhsearch_staged.sh` - Submit HHsearch jobs to staged nodes
-4. `destage_uniref_from_nodes.sh` - Clean up UniRef30 from nodes
+2. `submit_hhsearch_batch[2-5].sh` - Individual batch submission scripts
+3. `submit_hhsearch_fixed.sh` - Multi-batch submission wrapper (for future runs)
 
 ### Output Directories
 - `profiles/` - HHblits multiple sequence alignments (.a3m files)
 - `hhsearch/` - HHsearch results (.hhr files)
-- `staging/` - Staging logs and markers
 
-## Workflow Execution
+## Workflow Execution (Simplified Direct Access)
 
-### Step 1: Identify Nodes with Sufficient /tmp
+**Note**: UniRef30 is already extracted in `/home/rschaeff/search_libs/UniRef30_2023_02` and accessible from all nodes via NFS. **No staging required.**
 
-Check nodes in 96GB partition for /tmp capacity:
+### Submit HHsearch Jobs
 
-```bash
-# Submit test job to check /tmp on all nodes
-sbatch --array=16-34 --partition=96GB check_node_tmp.sh
-
-# Or manually check a single node
-srun --partition=96GB --nodes=1 --pty bash -c "df -h /tmp"
-```
-
-**Requirement**: ≥300GB /tmp space (261GB database + 40GB working space)
-
-**Recommended nodes** (update after verification):
-- leda20, leda21, leda22, leda23 (or other nodes with large /tmp)
-
-### Step 2: Stage UniRef30 Database
-
-Stage the database to selected nodes (~2 hours):
+The workflow submits 5 batches to process 4,297 chains:
 
 ```bash
-# Using default nodes
-./stage_uniref_to_nodes.sh
+cd /data/ecod/pdb_updates/backfill_2023_2025/blast
 
-# Or specify nodes explicitly
-./stage_uniref_to_nodes.sh leda20,leda21,leda22,leda23
+# Submit individual batches (already done for current run)
+sbatch submit_hhsearch_batch2.sh  # Chains 1001-2000
+sbatch submit_hhsearch_batch3.sh  # Chains 2001-3000
+sbatch submit_hhsearch_batch4.sh  # Chains 3001-4000
+sbatch submit_hhsearch_batch5.sh  # Chains 4001-4297
+
+# Or use wrapper for future runs
+./submit_hhsearch_fixed.sh
 ```
 
-**What it does**:
-- Copies `~/search_libs/UniRef30_2023_02_hhsuite.tar.gz` (66GB) to /tmp
-- Extracts to ~261GB uncompressed database
-- Creates staging markers in `staging/` directory
+**What each job does**:
+1. hhblits: Build profile against UniRef30 (~/search_libs/UniRef30_2023_02)
+2. hhsearch: Search profile against ECOD HMMs (/data/ecod/database_versions/v291/ecod_v291)
 
-**Monitor progress**:
-```bash
-squeue -u $USER --name=stage_uniref*
-tail -f staging/stage_*.log
-```
-
-**Verify staging**:
-```bash
-ls staging/*_staged.txt  # Should show one file per node
-```
-
-### Step 3: Submit HHsearch Jobs
-
-Submit jobs ONLY to nodes with staged database (~4-6 hours for 4,297 chains):
-
-```bash
-# Auto-detect staged nodes from markers
-./submit_hhsearch_staged.sh
-
-# Or specify nodes explicitly
-./submit_hhsearch_staged.sh leda20,leda21,leda22,leda23
-```
-
-**What it does**:
-- Submits 5 batches (4,297 chains ÷ 1000 per batch)
-- Each job runs:
-  1. hhblits: Build profile against UniRef30 (/tmp)
-  2. hhsearch: Search profile against ECOD HMMs
-- Max 500 concurrent jobs per batch
-- Outputs: `profiles/*.a3m` and `hhsearch/*.hhr`
+**SLURM array limit workaround**: Each batch uses array indices 1-N with offset calculation to avoid MaxArraySize=1000 limit.
 
 **Monitor progress**:
 ```bash
@@ -132,40 +109,26 @@ ls hhsearch/*.hhr | wc -l   # HHsearch completed
 - Memory: 16GB
 - CPUs: 4
 - Partition: 96GB
-
-### Step 4: Destage Database
-
-After ALL HHsearch jobs complete, free up /tmp space (~30 minutes):
-
-```bash
-# Verify all jobs completed
-squeue -u $USER --name=hhsearch*  # Should be empty
-
-# Run destaging
-./destage_uniref_from_nodes.sh
-```
-
-**What it does**:
-- Removes ~261GB UniRef30 database from /tmp
-- Cleans up temporary hhblits files
-- Removes staging markers
+- Max concurrent: 500 jobs per batch
 
 ## Timeline Estimate
 
-**With 4 staged nodes (parallel with partitioning)**:
-- Phase 1 (Staging): ~2 hours
-- Phase 2 (HHsearch): ~4-6 hours (4,297 chains ÷ 4 nodes ÷ ~8-10 chains/hour/node)
-- Phase 3 (Destaging): ~30 minutes
+**Direct access (simplified workflow)**:
+- HHsearch jobs: ~4-8 hours (depending on hhblits profile building time)
+  - hhblits: 10-30 min/chain (profile building against UniRef30)
+  - hhsearch: 5-10 min/chain (search against ECOD HMMs)
+- Max 500 concurrent jobs per batch (5 batches = 2,500 max concurrent total)
 
-**Total: ~6-8 hours**
+**Actual runtime** (current run started 2025-10-23 22:36):
+- Will be updated after completion
 
 ## Node Requirements
 
-Each staged node requires:
-- /tmp space: ≥300GB
-- RAM: 16GB per concurrent job
+Each node running HHsearch requires:
+- RAM: 16GB per job
 - CPUs: 4 per job
-- With %500 limit: Max 500 × 16GB = 8TB total RAM (well within 96GB node capacity with time-sharing)
+- Network access: ~/search_libs/UniRef30_2023_02 (261GB, NFS-mounted)
+- No local /tmp storage required (uses network database directly)
 
 ## Database Details
 
@@ -195,25 +158,33 @@ See `README.md` for complete workflow documentation.
 
 ## Troubleshooting
 
-### Issue: "UniRef30 not staged in /tmp"
-**Solution**: Run `stage_uniref_to_nodes.sh` first, verify with `ls staging/*_staged.txt`
+### Issue: "UniRef30 database not found"
+**Symptoms**: Jobs fail with "ERROR: UniRef30 database not found!"
+**Solution**: Verify database exists: `ls -lh /home/rschaeff/search_libs/UniRef30_2023_02_*.ffdata`
 
-### Issue: Jobs failing on wrong nodes
-**Solution**: Ensure `submit_hhsearch_staged.sh` uses correct `--nodelist`
-
-### Issue: Out of /tmp space
-**Solution**: Check df -h /tmp on nodes, ensure ≥300GB available
+### Issue: SLURM array limit exceeded
+**Symptoms**: "sbatch: error: Batch job submission failed: Invalid job array specification"
+**Cause**: SLURM MaxArraySize typically 1000, can't use indices >1000
+**Solution**: Use individual batch scripts with offset calculation (already implemented in submit_hhsearch_batch[2-5].sh)
 
 ### Issue: hhblits timeout
 **Default timeout**: 30 minutes per chain
 **Solution**: Check if chain has exceptionally long sequence, may need manual processing
+**Check**: `tail slurm_logs/hhsearch_*.err` for timeout messages
 
 ### Issue: Slow progress
-**Typical rate**: 8-10 chains/hour/node
+**Typical rate**: Variable depending on sequence length and homology
+- hhblits: 10-30 min/chain (profile building)
+- hhsearch: 5-10 min/chain (search)
 **Solutions**:
-- Verify all staged nodes are being used
 - Check for failed jobs: `sacct -u $USER --name=hhsearch* --state=FAILED`
-- Increase number of staged nodes if available
+- Monitor active jobs: `squeue -u $USER --name=hhsearch*`
+- Check SLURM logs for errors: `ls slurm_logs/hhsearch_*.err`
+
+### Issue: NFS performance bottleneck
+**Symptoms**: Many jobs accessing UniRef30 simultaneously causing slow I/O
+**Mitigation**: SLURM %500 limit reduces concurrent access
+**Check**: Monitor with `squeue -u $USER --name=hhsearch* | grep " R " | wc -l`
 
 ## References
 

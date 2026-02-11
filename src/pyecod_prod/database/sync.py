@@ -38,13 +38,13 @@ class DatabaseSync:
             raise ImportError("psycopg2 is required for database sync. Install with: pip install psycopg2-binary")
 
         if connection_params is None:
-            # Use defaults (can be overridden with env vars)
+            # Use defaults for production database on dione
             connection_params = {
-                "host": "localhost",
-                "port": 5432,
-                "database": "update_protein",
+                "host": "dione",
+                "port": 45000,
+                "database": "ecod_protein",
                 "user": "ecod",
-                "password": None  # Will use .pgpass or other auth
+                "password": "ecod#badmin"
             }
 
         self.conn_params = connection_params
@@ -90,21 +90,31 @@ class DatabaseSync:
         with open(manifest_path) as f:
             manifest = yaml.safe_load(f)
 
-        # Extract batch metadata
-        batch_name = manifest["batch_name"]
-        batch_type = manifest.get("batch_type", "weekly")
+        # Extract batch metadata (handle both old and new manifest formats)
+        batch_info = manifest.get("batch_info", {})
+        if batch_info:
+            # New format with batch_info section
+            batch_name = batch_info["batch_name"]
+            batch_type = batch_info.get("batch_type", "weekly")
+            release_date = batch_info.get("release_date")
+            pdb_status_path = batch_info.get("pdb_status_path", "")
+            created_at = batch_info.get("created")
+        else:
+            # Old format with flat structure
+            batch_name = manifest["batch_name"]
+            batch_type = manifest.get("batch_type", "weekly")
+            release_date = manifest.get("release_date")
+            pdb_status_path = manifest.get("pdb_status_path", "")
+            created_at = manifest.get("created")
 
         if batch_type != "weekly":
             raise ValueError(f"Expected weekly batch, got {batch_type}")
 
-        release_date = manifest.get("release_date")
         if not release_date:
             # Parse from batch name (ecod_weekly_20251019)
             release_date = batch_name.split("_")[-1]
             release_date = f"{release_date[:4]}-{release_date[4:6]}-{release_date[6:8]}"
 
-        pdb_status_path = manifest.get("pdb_status_path", "")
-        created_at = manifest.get("created")
         processing_status = manifest.get("processing_status", {})
 
         # Insert or update weekly_release record

@@ -236,11 +236,12 @@ def load_clustering_to_pdb_update(
         max_cluster_size = max(cluster_sizes) if cluster_sizes else 0
 
         # Get classifiable chain count from chain_status
+        # Note: For backfill workflows, this may span multiple releases
         cursor.execute("""
             SELECT COUNT(*)
             FROM pdb_update.chain_status
-            WHERE release_date = %s AND can_classify = TRUE
-        """, (release_date,))
+            WHERE can_classify = TRUE
+        """)
         classifiable_chains = cursor.fetchone()[0]
 
         # Insert clustering_run record
@@ -287,6 +288,20 @@ def load_clustering_to_pdb_update(
                 logger.warning(f"Skipping cluster {cluster_id}: {e}")
                 continue
 
+            # Look up representative's actual release_date from chain_status
+            cursor.execute("""
+                SELECT release_date FROM pdb_update.chain_status
+                WHERE pdb_id = %s AND chain_id = %s
+                LIMIT 1
+            """, (rep_pdb_id, rep_chain_id))
+
+            rep_result = cursor.fetchone()
+            if not rep_result:
+                missing_chains.append(rep_seq_id)
+                continue
+
+            rep_release_date = rep_result[0]
+
             # Insert representative to cluster_member
             cursor.execute("""
                 INSERT INTO pdb_update.cluster_member
@@ -294,7 +309,7 @@ def load_clustering_to_pdb_update(
                      is_representative, sequence_identity_to_rep)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (clustering_run_id, cluster_id, pdb_id, chain_id) DO NOTHING
-            """, (clustering_run_id, cluster_id, rep_pdb_id, rep_chain_id, release_date, True, 1.0))
+            """, (clustering_run_id, cluster_id, rep_pdb_id, rep_chain_id, rep_release_date, True, 1.0))
 
             # Update chain_status for representative
             cursor.execute("""
@@ -306,7 +321,7 @@ def load_clustering_to_pdb_update(
                     sequence_identity_to_rep = NULL
                 WHERE pdb_id = %s AND chain_id = %s AND release_date = %s
                 RETURNING pdb_id
-            """, (cluster_id, rep_pdb_id, rep_chain_id, release_date))
+            """, (cluster_id, rep_pdb_id, rep_chain_id, rep_release_date))
 
             if cursor.fetchone():
                 loaded_reps += 1
@@ -325,6 +340,20 @@ def load_clustering_to_pdb_update(
                     logger.warning(f"Skipping member {member_seq_id}: {e}")
                     continue
 
+                # Look up member's actual release_date from chain_status
+                cursor.execute("""
+                    SELECT release_date FROM pdb_update.chain_status
+                    WHERE pdb_id = %s AND chain_id = %s
+                    LIMIT 1
+                """, (member_pdb_id, member_chain_id))
+
+                member_result = cursor.fetchone()
+                if not member_result:
+                    missing_chains.append(member_seq_id)
+                    continue
+
+                member_release_date = member_result[0]
+
                 # Insert to cluster_member
                 cursor.execute("""
                     INSERT INTO pdb_update.cluster_member
@@ -332,7 +361,7 @@ def load_clustering_to_pdb_update(
                          is_representative, sequence_identity_to_rep)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (clustering_run_id, cluster_id, pdb_id, chain_id) DO NOTHING
-                """, (clustering_run_id, cluster_id, member_pdb_id, member_chain_id, release_date, False, identity))
+                """, (clustering_run_id, cluster_id, member_pdb_id, member_chain_id, member_release_date, False, identity))
 
                 # Update chain_status for member
                 cursor.execute("""
@@ -344,7 +373,7 @@ def load_clustering_to_pdb_update(
                         sequence_identity_to_rep = %s
                     WHERE pdb_id = %s AND chain_id = %s AND release_date = %s
                     RETURNING pdb_id
-                """, (cluster_id, rep_pdb_id, rep_chain_id, identity, member_pdb_id, member_chain_id, release_date))
+                """, (cluster_id, rep_pdb_id, rep_chain_id, identity, member_pdb_id, member_chain_id, member_release_date))
 
                 if cursor.fetchone():
                     loaded_members += 1

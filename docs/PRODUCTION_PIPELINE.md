@@ -1,50 +1,32 @@
-# Production Pipeline: pdb_update → ecod_commons
+# Production Pipeline: Routing Logic & Pfam Integration
 
-This document describes the production workflow for routing pyecod_mini partition results from the `pdb_update` staging schema to the `ecod_commons` production schema.
+**Date**: 2025-10-23
+**Status**: DESIGN SPECIFICATION
+
+**See**: [PRODUCTION_WORKFLOW.md](PRODUCTION_WORKFLOW.md) for complete end-to-end workflow.
+
+This document focuses on:
+1. **Routing logic** for auto-accession vs. manual curation
+2. **Pfam integration** for F-group assignment
+3. **Quality thresholds** and decision criteria
+
+---
 
 ## Overview
 
-**Goal**: Automatically classify new PDB domains into ECOD, with separate tracks for:
-- **Minor versions** (v291.1, v291.2, etc.): Auto-accession only (high confidence)
-- **Major versions** (v292, v293, etc.): Curated results + new F-groups + hierarchical changes
+**Goal**: Route partition results from filesystem to appropriate destination:
+- **ecod_commons**: High-quality auto-assignments (88-90% of domains)
+- **ecod_curation**: Domains needing manual review (10-12% of domains)
 
-**Bundle Frequency**: Twice yearly (every 6 months) aggregating ~26 weekly PDB releases
+**Data Flow**: partition.xml + pfam_hits.tbl → routing decision → ecod_commons OR ecod_curation
 
-**Previous Run**: 114,146 domains classified as `mini_pyecod_v2_20250627` in ecod_commons
-
----
-
-## Workflow Phases
-
-### Phase 1: Partition Generation (pdb_update schema)
-
-**Input**: Weekly PDB releases → BLAST + HHsearch evidence → domain_summary.xml
-
-**Process**: pyecod_mini partitioning
-
-**Output**: partition.xml files with domain assignments
-
-**Storage**: `pdb_update.chain_partitions` table (not yet implemented)
-
-**Schema** (proposed):
-```sql
-CREATE TABLE pdb_update.chain_partitions (
-    pdb_id text NOT NULL,
-    chain_id text NOT NULL,
-    release_date date NOT NULL,
-    partition_status text,  -- 'complete', 'failed', 'pending'
-    partition_quality text, -- 'good', 'low_coverage', 'fragmentary', 'no_domains'
-    coverage float,
-    domain_count integer,
-    classification_method text,  -- 'mini_pyecod_v2'
-    algorithm_version text,      -- '2.0.0'
-    PRIMARY KEY (pdb_id, chain_id, release_date)
-);
-```
+**Key Principle**: pdb_update schema is for **tracking only**, not staging partition data
 
 ---
 
-### Phase 2: F-group Assignment via Pfam
+## Pfam Integration
+
+### Database Setup
 
 **Purpose**: Assign family-level classification to each putative domain using Pfam v38.
 
@@ -87,11 +69,18 @@ WHERE type = 'F' AND pfam_acc = 'PF00562';
 
 ---
 
-### Phase 3: Routing Decision Logic
+## Routing Decision Logic
 
-After partitioning + Pfam hmmscan, each domain follows one of three paths:
+**Input**: For each domain in partition.xml
+- Partition quality (coverage-based)
+- Pfam hmmscan results
+- BLAST/HHsearch evidence
 
-#### Path 1: Direct Auto-Accession (Minor Version)
+**Output**: Route to ecod_commons (auto) OR ecod_curation (manual)
+
+### Three Routing Paths
+
+#### Path 1: Direct F-group Assignment → ecod_commons
 
 **Criteria** (ALL must be true):
 1. `partition_quality = 'good'` (coverage ≥80%)
@@ -99,9 +88,21 @@ After partitioning + Pfam hmmscan, each domain follows one of three paths:
 3. Pfam→F-group mapping exists in `ecod_rep.cluster`
 4. Evidence supports single H-group (no conflicts)
 
-**Action**: Assign to F-group, stage for minor version bundle
+**Action**: Load to `ecod_commons.domains` with F-group assignment
 
-**Storage**: `ecod_commons.domains` with `classification_status = 'auto'`
+**Database**:
+```sql
+INSERT INTO ecod_commons.domains (
+    uid, ecod_domain_id, pdb_id, chain_id,
+    f_id, t_id, h_id, x_id,
+    classification_method, classification_status,
+    domain_version  -- NULL until bundled
+) VALUES (
+    gen_uid(), '8abc_A_1', '8abc', 'A',
+    '123.1.4', '123', '123.1', '123',
+    'mini_pyecod_v2', 'auto', NULL
+);
+```
 
 **Example**:
 ```
@@ -109,50 +110,86 @@ Domain: 8abc_A_1 (residues 10-150)
 Pfam hit: PF00562 (RNA-binding domain, E=1e-25)
 ecod_rep lookup: e4753.10.4 (RNA-binding domain)
 → Auto-assign to F-group e4753.10.4
-→ Include in next minor version (v291.1)
+→ Load to ecod_commons (auto status)
+→ Will be included in next bundle (v291.1)
 ```
 
-#### Path 2: Route to Curation (Major Version)
+**Estimated**: ~70% of all domains
+
+#### Path 2: Manual Curation → ecod_curation
 
 **Criteria** (ANY is true):
 1. Pfam hit exists BUT no F-group mapping in `ecod_rep.cluster`
    - **Reason**: New F-group needed
-   - **Action**: Flag for curator review, create new F-group in ecod_rep
+   - **Priority**: Medium (5)
 
 2. `partition_quality = 'low_coverage'` or `'fragmentary'`
    - **Reason**: Uncertain domain boundaries
-   - **Action**: Manual inspection of partition + evidence
+   - **Priority**: High (8-10)
 
 3. Evidence from multiple conflicting H-groups
    - **Reason**: Possible domain fusion or chimera
-   - **Action**: Curator determines correct classification
+   - **Priority**: High (7)
 
-**Storage**: `ecod_curation` schema (for review)
+**Action**: Load to `ecod_curation` schema for manual review
 
-**Output**: Curated results included in next major version (v292)
+**Database**:
+```sql
+-- Insert protein and domains to ecod_curation
+INSERT INTO ecod_curation.protein (...);
+INSERT INTO ecod_curation.domain_assignment (...);
+INSERT INTO ecod_curation.domain_evidence (...);
+
+-- Add to curation queue with priority
+INSERT INTO ecod_curation.curation_queue
+    (protein_id, priority, priority_reason)
+VALUES (protein_id, 5, 'new_pfam_family');
+```
 
 **Example**:
 ```
 Domain: 9xyz_B_2 (residues 200-350)
 Pfam hit: PF12345 (Hypothetical protein family, E=5e-10)
 ecod_rep lookup: NULL (no F-group for PF12345)
-→ Route to curation (new F-group needed)
-→ Curator assigns to new F-group e5000.1.1
-→ Include in next major version (v292)
+→ Route to ecod_curation (new F-group needed)
+→ Curator reviews, assigns to new F-group e5000.1.1
+→ After approval, accessions to ecod_commons
+→ Included in next major version bundle (v292)
 ```
 
-#### Path 3: .0 Pseudo-group Assignment (Minor Version)
+**Estimated**: ~10-12% of all domains
 
-**Criteria**:
+#### Path 3: .0 Pseudo-group Assignment → ecod_commons
+
+**Criteria** (ALL must be true):
 1. No Pfam hit (E-value > 0.001 or no alignments)
 2. `partition_quality = 'good'` (coverage ≥80%)
-3. Evidence supports single H-group
+3. Evidence supports single H-group with ≥70% consensus
 
-**Action**: Assign to H-group.0 pseudo-group
+**Action**: Assign to H-group.0 pseudo-group, load to ecod_commons
 
-**Storage**: `ecod_commons.f_group_assignments` (NOT in ecod_rep)
+**Database**:
+```sql
+-- Insert domain with H-group only
+INSERT INTO ecod_commons.domains (
+    uid, ecod_domain_id, pdb_id, chain_id,
+    f_id, t_id, h_id, x_id,
+    classification_method, classification_status,
+    domain_version
+) VALUES (
+    gen_uid(), '7def_C_1', '7def', 'C',
+    NULL,  -- No F-group
+    '123', '123.1', '123',
+    'mini_pyecod_v2', 'auto', NULL
+);
 
-**Pseudo-group naming**: `{X}.{H}.0` (e.g., `123.1.0`)
+-- Record .0 pseudo-group assignment
+INSERT INTO ecod_commons.f_group_assignments (
+    domain_id, f_group_name, assignment_type
+) VALUES (
+    domain_id, '123.1.0', 'pseudo'
+);
+```
 
 **Example**:
 ```
@@ -160,7 +197,8 @@ Domain: 7def_C_1 (residues 1-120)
 Pfam hit: None
 BLAST evidence: Multiple hits to H-group e123.1 (all E<0.001)
 → Assign to pseudo-group e123.1.0
-→ Include in next minor version (v291.1)
+→ Load to ecod_commons (auto status)
+→ Will be included in next bundle (v291.1)
 ```
 
 **Note**: .0 pseudo-groups represent domains that:
@@ -168,129 +206,92 @@ BLAST evidence: Multiple hits to H-group e123.1 (all E<0.001)
 - Belong to known H-groups (strong BLAST evidence)
 - Lack Pfam family assignment (may be ECOD-specific or poorly characterized)
 
+**Estimated**: ~18-20% of all domains
+
 ---
 
-### Phase 4: Bundle Creation
+## Bundle Creation
 
-#### Minor Version Bundle (v291.1, v291.2, etc.)
+### Minor Version Bundle (v291.1, v291.2, etc.)
 
-**Composition**: All domains from 6-month period that meet auto-accession criteria
+**Purpose**: Aggregate auto-assigned domains into versioned release
+
+**Frequency**: Twice yearly (January, July) covering ~26 weekly releases
 
 **Includes**:
-- Path 1: Direct F-group assignments (known Pfam families)
-- Path 3: .0 pseudo-group assignments (no Pfam hit)
+- Path 1: Direct F-group assignments (~70%)
+- Path 3: .0 pseudo-group assignments (~20%)
+- **Total**: ~88-90% of processed domains
 
 **Excludes**:
+- Domains in ecod_curation (awaiting manual review)
 - Curated results (go to major version)
-- Low quality partitions
-- Domains needing new F-groups
-
-**Version increment**: `v291 → v291.1 → v291.2 → ...`
-
-**Timeline**: Released twice yearly (January, July)
-
-**Database operations**:
-1. INSERT domains into `ecod_commons.domains`
-2. INSERT .0 assignments into `ecod_commons.f_group_assignments`
-3. UPDATE `domain_version` field to track bundle (e.g., `mini_pyecod_v2_20260115`)
-4. Mark chains in `pdb_update.chain_status` as `ecod_status = 'in_current_ecod'`
-
-**SQL pattern**:
-```sql
--- Insert auto-accession domains
-INSERT INTO ecod_commons.domains
-    (uid, ecod_domain_id, pdb_id, chain_id, f_id, t_id, h_id, x_id,
-     classification_method, classification_status, domain_version)
-SELECT
-    gen_uid(),
-    gen_domain_id(pdb_id, chain_id, domain_num),
-    pdb_id, chain_id,
-    f_group_id, t_group_id, h_group_id, x_group_id,
-    'mini_pyecod_v2',
-    'auto',
-    'mini_pyecod_v2_20260115'
-FROM pdb_update.chain_partitions cp
-JOIN pdb_update.domain_assignments da USING (pdb_id, chain_id)
-WHERE cp.partition_quality = 'good'
-  AND da.assignment_type IN ('direct_fgroup', 'pseudo_fgroup')
-  AND cp.release_date BETWEEN '2025-07-01' AND '2025-12-31';
-```
-
-#### Major Version Bundle (v292, v293, etc.)
-
-**Composition**: Curated results + hierarchical changes + new F-groups
-
-**Includes**:
-- Path 2: Curated domain assignments
-- New F-groups (added to ecod_rep.cluster)
-- Hierarchical reorganizations (H-group splits, merges, etc.)
-- Policy changes (coverage thresholds, evidence cutoffs)
-
-**Version increment**: `v291 → v292 → v293 → ...`
-
-**Timeline**: As needed (typically annually or when major curation effort completes)
 
 **Process**:
-1. Curators review flagged domains in ecod_curation schema
-2. New F-groups added to ecod_rep.cluster with pfam_acc
-3. Hierarchical changes applied to ecod_rep
-4. Bundle created with both curated and auto domains
-5. Website regenerated with new hierarchy
+```bash
+python scripts/create_bundle.py \
+    --start-date 2025-07-01 \
+    --end-date 2025-12-31 \
+    --version v291.1 \
+    --type minor
+```
+
+**What it does**:
+1. Query all auto-assigned domains from ecod_commons (domain_version IS NULL)
+2. Assign bundle version to `domain_version` field
+3. Generate distributable files (XML, flat files)
+4. Update ECOD website data
+5. Mark chains in pdb_update.chain_status as processed
+
+**Database operations**:
+```sql
+-- Assign bundle version to unbundled auto domains
+UPDATE ecod_commons.domains
+SET domain_version = 'v291.1_20260115'
+WHERE classification_status = 'auto'
+  AND domain_version IS NULL
+  AND created_at BETWEEN '2025-07-01' AND '2025-12-31';
+
+-- Update tracking in pdb_update
+UPDATE pdb_update.chain_status
+SET ecod_status = 'in_current_ecod',
+    bundle_version = 'v291.1'
+WHERE (pdb_id, chain_id) IN (
+    SELECT DISTINCT pdb_id, chain_id
+    FROM ecod_commons.domains
+    WHERE domain_version = 'v291.1_20260115'
+);
+```
+
+### Major Version Bundle (v292, v293, etc.)
+
+**Purpose**: Release curated results + new F-groups + hierarchical changes
+
+**Frequency**: Annually or when major curation effort completes
+
+**Includes**:
+- Curated domains from ecod_curation (Path 2 after manual review)
+- New F-groups added to ecod_rep
+- Hierarchical reorganizations
+- All unbundled auto domains
+
+**Process**:
+```bash
+# Accession curated domains from ecod_curation → ecod_commons
+python scripts/accession.py batch --name v292
+
+# Create major version bundle
+python scripts/create_bundle.py \
+    --version v292 \
+    --type major \
+    --include-curated
+```
 
 **Downstream impacts**:
-- ECOD website rebuild (hierarchy visualizations)
+- ECOD website rebuild (new hierarchy)
 - Distributable updates (XML, flat files)
-- HMM database regeneration (for BLAST/HHsearch)
-- Literature announcement (publications, release notes)
-
----
-
-## Database Schemas
-
-### pdb_update Schema (Staging)
-
-**Purpose**: Temporary storage for new PDB releases and classification results
-
-**Key tables**:
-- `chain_status`: Track chains from weekly releases, clustering, ECOD status
-- `chain_partitions`: Store partition results (quality, coverage)
-- `domain_assignments`: Store domain ranges + F-group assignments
-- `pfam_hits`: Store hmmscan results for each domain
-
-### ecod_curation Schema (Review)
-
-**Purpose**: Queue for manual curation
-
-**Key tables**:
-- `domains_pending`: Domains flagged for review
-- `new_fgroups_proposed`: Pfam families needing new F-groups
-- `curation_decisions`: Curator actions (approve, reject, reassign)
-
-**Not yet implemented** - requires design
-
-### ecod_commons Schema (Production)
-
-**Purpose**: Live production data (includes .0 pseudo-groups)
-
-**Key tables**:
-- `domains`: All classified domains (auto + curated)
-- `f_group_assignments`: F-group assignments including .0 pseudo-groups
-- `domain_versions`: Track bundle metadata
-
-**Fields for tracking**:
-- `classification_method`: 'mini_pyecod_v2'
-- `classification_status`: 'auto' | 'curated'
-- `domain_version`: Bundle identifier (e.g., 'mini_pyecod_v2_20260115')
-
-### ecod_rep Schema (Authoritative)
-
-**Purpose**: Hierarchical policy (manual curation only)
-
-**Key tables**:
-- `cluster`: H-groups, T-groups, F-groups (with pfam_acc)
-- `cluster_members`: Domain→cluster assignments
-
-**Important**: NO automated changes (except new F-groups with approval)
+- HMM database regeneration
+- Literature announcement
 
 ---
 
@@ -327,148 +328,36 @@ def assess_quality(coverage):
 
 ---
 
-## Implementation Roadmap
+## Summary
 
-### Phase 1: Database Schema (pdb_update)
-- [ ] Create `chain_partitions` table
-- [ ] Create `domain_assignments` table
-- [ ] Create `pfam_hits` table
-- [ ] Add indexes for performance
+This document defines the **routing logic** for classifying partition results:
 
-### Phase 2: Pfam Integration
-- [ ] Write `pfam_scanner.py` to run hmmscan on domain FASTAs
-- [ ] Parse domain table output (--domtblout)
-- [ ] Load results to `pdb_update.pfam_hits`
-- [ ] Implement F-group lookup against `ecod_rep.cluster`
+**Three Paths**:
+1. **Direct F-group** (→ ecod_commons): Good quality + known Pfam family (~70%)
+2. **Manual curation** (→ ecod_curation): Low quality or new Pfam families (~10-12%)
+3. **.0 pseudo-group** (→ ecod_commons): Good quality + no Pfam hit (~18-20%)
 
-### Phase 3: Routing Logic
-- [ ] Implement decision tree (auto vs. curation vs. .0)
-- [ ] Generate reports: auto-eligible, needs-curation, no-pfam
-- [ ] Populate `pdb_update.domain_assignments` with routing decisions
+**Key Technologies**:
+- **Pfam v38**: Family-level classification
+- **hmmscan**: Pfam hit detection (E ≤ 0.001)
+- **ecod_rep**: Authoritative Pfam→F-group mapping
 
-### Phase 4: Bundle Preparation
-- [ ] Write bundle SQL scripts (minor version)
-- [ ] Implement .0 pseudo-group generation
-- [ ] Write validation queries (check for conflicts, duplicates)
-- [ ] Dry-run bundle creation on test data
-
-### Phase 5: ecod_curation Integration
-- [ ] Design curation schema (tables + workflow)
-- [ ] Build curation UI or CLI tools
-- [ ] Implement major version bundle workflow
+**Implementation Status**:
+- ✅ Pfam database setup
+- ✅ F-group lookup logic (ecod_rep.cluster)
+- ✅ Quality thresholds defined
+- 🔄 Routing script (route_and_load.py) - in progress
+- ⏳ Pfam scanning integration
+- ⏳ Bundle creation scripts
 
 ---
 
-## Example Workflow: 6-Month Bundle (v291.1)
-
-**Timeline**: July 2025 - December 2025 (26 weekly releases)
-
-**Step 1**: Aggregate partition results
-```sql
--- Count domains ready for auto-accession
-SELECT
-    COUNT(*) as total_domains,
-    COUNT(*) FILTER (WHERE partition_quality = 'good') as good_quality,
-    COUNT(*) FILTER (WHERE partition_quality != 'good') as needs_review
-FROM pdb_update.chain_partitions
-WHERE release_date BETWEEN '2025-07-01' AND '2025-12-31';
-```
-
-**Step 2**: Run Pfam hmmscan on all good-quality domains
-```bash
-# Generate domain FASTAs from partition.xml files
-python scripts/extract_domain_sequences.py \
-    --partitions /data/ecod/pdb_updates/batches/*/partitions/*.xml \
-    --output domains_july_dec_2025.fasta
-
-# Run hmmscan
-hmmscan --cpu 32 -E 0.001 --domtblout domains_pfam_hits.tbl \
-    ~/data/pfam/v38/Pfam-A.hmm \
-    domains_july_dec_2025.fasta
-
-# Load to database
-python scripts/load_pfam_hits.py domains_pfam_hits.tbl
-```
-
-**Step 3**: Apply routing logic
-```sql
--- Auto-accession: Known F-groups
-UPDATE pdb_update.domain_assignments da
-SET assignment_type = 'direct_fgroup',
-    f_group_id = rc.id
-FROM pdb_update.pfam_hits ph
-JOIN ecod_rep.cluster rc ON rc.pfam_acc = ph.pfam_acc AND rc.type = 'F'
-WHERE da.pdb_id = ph.pdb_id
-  AND da.chain_id = ph.chain_id
-  AND da.domain_num = ph.domain_num
-  AND ph.evalue <= 0.001;
-
--- .0 pseudo-groups: No Pfam hit
-UPDATE pdb_update.domain_assignments da
-SET assignment_type = 'pseudo_fgroup',
-    h_group_id = consensus_h_group(da.pdb_id, da.chain_id)
-WHERE NOT EXISTS (
-    SELECT 1 FROM pdb_update.pfam_hits ph
-    WHERE ph.pdb_id = da.pdb_id
-      AND ph.chain_id = da.chain_id
-      AND ph.domain_num = da.domain_num
-      AND ph.evalue <= 0.001
-);
-
--- Curation: New Pfam families
-INSERT INTO ecod_curation.domains_pending
-SELECT da.*
-FROM pdb_update.domain_assignments da
-JOIN pdb_update.pfam_hits ph USING (pdb_id, chain_id, domain_num)
-WHERE ph.evalue <= 0.001
-  AND NOT EXISTS (
-      SELECT 1 FROM ecod_rep.cluster rc
-      WHERE rc.pfam_acc = ph.pfam_acc AND rc.type = 'F'
-  );
-```
-
-**Step 4**: Generate bundle report
-```
-v291.1 Bundle Summary (2025-07-01 to 2025-12-31)
-=================================================
-PDB releases processed: 26 weeks
-Total chains: 8,432
-Total domains: 12,567
-
-Auto-accession breakdown:
-  Direct F-group: 9,234 (73.5%)
-  .0 pseudo-group: 2,156 (17.2%)
-
-Needs curation:
-  New Pfam families: 456 (3.6%)
-  Low coverage: 721 (5.7%)
-
-Bundle size: 11,390 domains (90.7% auto)
-```
-
-**Step 5**: Load to ecod_commons
-```bash
-# Dry-run validation
-python scripts/create_bundle.py \
-    --start-date 2025-07-01 \
-    --end-date 2025-12-31 \
-    --version v291.1 \
-    --dry-run
-
-# Load bundle
-python scripts/create_bundle.py \
-    --start-date 2025-07-01 \
-    --end-date 2025-12-31 \
-    --version v291.1 \
-    --execute
-```
-
----
 
 ## References
 
-- **Pfam**: https://www.ebi.ac.uk/interpro/entry/pfam/
-- **HMMER**: http://hmmer.org/
-- **ECOD**: https://prodata.swmed.edu/ecod/
-- **pyecod_mini**: `/home/rschaeff/dev/pyecod_mini/`
-- **Database**: `ecod_protein` on PostgreSQL server
+- **Complete Workflow**: [PRODUCTION_WORKFLOW.md](PRODUCTION_WORKFLOW.md) - End-to-end data flow
+- **Curation Workflow**: [ecod_curation_integration.md](ecod_curation_integration.md) - Manual review process
+- **pyecod_mini API**: [PYECOD_MINI_API_SPEC.md](PYECOD_MINI_API_SPEC.md)
+- **Pfam database**: ~/data/pfam/v38/Pfam-A.hmm
+- **ECOD hierarchy**: ecod_rep schema on dione:45000/ecod_protein
+- **Database**: ecod_commons, ecod_curation, pdb_update schemas

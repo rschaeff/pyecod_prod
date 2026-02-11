@@ -19,6 +19,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 from pathlib import Path
 
+from pyecod_prod.utils.pdb_ids import extract_pdb_id_from_line
+
 
 @dataclass
 class SyncStatus:
@@ -261,11 +263,10 @@ class ECODSyncAssessor:
         pdb_ids = set()
         with open(added_pdb) as f:
             for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    pdb_id = line[:4].lower()
-                    if len(pdb_id) == 4:
-                        pdb_ids.add(pdb_id)
+                # Extract PDB ID using flexible parser (supports legacy and extended formats)
+                pdb_id = extract_pdb_id_from_line(line)
+                if pdb_id:
+                    pdb_ids.add(pdb_id)
 
         return pdb_ids
 

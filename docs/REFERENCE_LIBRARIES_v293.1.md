@@ -1,0 +1,1 @@
+/data/ecod/database_versions/v293.1/REFERENCE_LIBRARIES_v293.1.md

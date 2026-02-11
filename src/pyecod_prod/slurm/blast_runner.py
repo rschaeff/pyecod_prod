@@ -70,6 +70,7 @@ class BlastRunner:
         partition: str = "96GB",
         time_limit: str = "4:00:00",
         array_limit: int = 500,
+        chain_filter: Optional[List[str]] = None,
     ) -> str:
         """
         Create SLURM script for BLAST job array.
@@ -81,6 +82,7 @@ class BlastRunner:
             blast_type: 'chain', 'domain', or 'both'
             partition: SLURM partition
             time_limit: Time limit per job
+            chain_filter: Optional list of chain IDs to process (e.g., ['8abc_A', '8def_B'])
 
         Returns:
             Path to created script
@@ -96,12 +98,33 @@ class BlastRunner:
         scripts_dir = batch_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
 
-        # Count FASTA files
-        fasta_files = sorted(fasta_dir.glob("*.fa"))
+        # Count FASTA files (filter if specified)
+        all_fasta_files = sorted(fasta_dir.glob("*.fa"))
+
+        if chain_filter:
+            # Filter to only requested chains
+            chain_filter_set = set(chain_filter)
+            fasta_files = [
+                f for f in all_fasta_files
+                if f.stem in chain_filter_set
+            ]
+        else:
+            fasta_files = all_fasta_files
+
         num_files = len(fasta_files)
 
         if num_files == 0:
-            raise ValueError(f"No FASTA files found in {fasta_dir}")
+            if chain_filter:
+                raise ValueError(f"No FASTA files found matching filter in {fasta_dir}")
+            else:
+                raise ValueError(f"No FASTA files found in {fasta_dir}")
+
+        # Check SLURM array job limit (1000 on most clusters)
+        if num_files > 1000:
+            raise ValueError(
+                f"SLURM array limit exceeded: {num_files} files > 1000 job limit. "
+                f"Consider splitting into multiple batches or using CD-HIT clustering."
+            )
 
         # Create file list for array indexing
         file_list = scripts_dir / "blast_files.txt"
@@ -192,6 +215,7 @@ echo "BLAST complete for $BASENAME"
         blast_type: str = "both",
         partition: str = "96GB",
         array_limit: int = 500,
+        chain_filter: Optional[List[str]] = None,
     ) -> str:
         """
         Submit BLAST job array to SLURM.
@@ -203,6 +227,7 @@ echo "BLAST complete for $BASENAME"
             blast_type: 'chain', 'domain', or 'both'
             partition: SLURM partition
             array_limit: Max concurrent array jobs
+            chain_filter: Optional list of chain IDs to process (only these chains)
 
         Returns:
             SLURM job ID
@@ -219,6 +244,7 @@ echo "BLAST complete for $BASENAME"
             blast_type=blast_type,
             partition=partition,
             array_limit=array_limit,
+            chain_filter=chain_filter,
         )
 
         # Submit to SLURM with array limit

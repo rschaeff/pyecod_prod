@@ -15,6 +15,7 @@ dependencies = [
     "pyyaml>=6.0",
     "psycopg2-binary>=2.9",
     "biopython>=1.81",
+    "pyecod-mini>=2.0.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
