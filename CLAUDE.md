@@ -1029,6 +1029,75 @@ GROUP BY ecod_status;
 
 ---
 
+### Self-Exclusion / Non-Circular Rep Validation (June 2026)
+
+**Purpose**: Validate **existing** ECOD representative domains with the current
+algorithm without the query trivially self-matching its own reference entry
+(circularity). Used for the v294 F-group reconciliation (the 456 "movers") and,
+eventually, a full self-consistency audit.
+
+**Requires** `pyecod_mini >= 2.1.0` (adds the exclusion API).
+
+**How it works**: evidence is masked before partitioning so a rep is classified
+from *independent* evidence only. Masking is opt-in; default behavior is unchanged.
+
+**Exclusion options** (forwarded by `PartitionRunner.partition()`):
+- `exclude_self=True` — drop hits to the query's own structure (same PDB id)
+- `exclude_domain_ids=[...]` — drop specific reference ECOD domain ids
+- `exclude_fgroups=[...]` / `exclude_tgroups=[...]` — drop by classification
+
+```python
+from pyecod_prod.core.partition_runner import PartitionRunner
+
+runner = PartitionRunner()
+result = runner.partition(
+    summary_xml="summaries/1gcy_A.summary.xml",
+    output_dir="partitions/",
+    exclude_self=True,                       # removes the e1gcyA2 self-hit
+    exclude_domain_ids=["e1gcyA1", "e1gcyA2"],  # optional explicit F-group list
+)
+```
+
+**Classification on summaries** (enables F-group/T-group exclusion):
+`SummaryGenerator` emits `t_group/h_group/x_group/f_group` on each `<hit>` when a
+classification lookup is loaded. Build the lookup once per ECOD version:
+
+```bash
+python scripts/build_classification_lookup.py \
+    /data/ecod/database_versions/v291/ecod.develop291.xml \
+    /data/ecod/database_versions/v291/domain_classification_lookup.tsv
+```
+
+```python
+from pyecod_prod.utils.classification_lookup import load_classification_lookup_for_version
+clf = load_classification_lookup_for_version("develop291")
+generator = SummaryGenerator(reference_version="develop291", classification_lookup=clf)
+```
+
+**IMPORTANT — legacy ECOD XML naming**: in the old XML the element named
+`f_group` is actually the **T-group** and `pf_group` (Pfam group) is the real
+**F-group**. `build_classification_lookup.py` maps these to their true levels
+(x_id→x_group, h_id→h_group, f_group/f_id→t_group, pf_group/pf_id→f_group).
+
+**Optional pre-masked summaries**: `SummaryGenerator.generate_summary(...,
+exclude_self=True, exclude_domain_ids={...})` writes a summary with self/listed
+hits already removed, plus a `<masked_evidence count=.../>` metadata element.
+
+**Regression driver** (the 456 movers): `scripts/validate_reps_self_exclusion.py`
+takes a TSV of reps (`domain_id, pdb_id, chain_id, old_f, commons_f, summary_xml
+[, exclude_domains]`), runs each with `exclude_self`, maps each output domain's
+`reference_ecod_domain_id` to an F-group via the classification lookup, and reports
+`supported` / `different` / `unclassified` per rep.
+
+```bash
+python scripts/validate_reps_self_exclusion.py movers.tsv \
+    --output movers_validation.tsv --reference develop291
+```
+
+**Output evidence of non-circularity**: partition.xml `<metadata>` carries
+`exclusion_policy` and `evidence_items_masked`; a `<domain>` with
+`top_evidence_masked="true"` had masked (e.g. self) evidence over its range.
+
 ## Historical Backfill (2023-2025)
 
 ### Overview

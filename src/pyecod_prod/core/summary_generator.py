@@ -64,7 +64,8 @@ class SummaryGenerator:
     def __init__(
         self,
         reference_version: str = "develop291",
-        family_lookup: Optional[Dict[str, str]] = None
+        family_lookup: Optional[Dict[str, str]] = None,
+        classification_lookup: Optional[Dict[str, Dict[str, str]]] = None,
     ):
         """
         Initialize summary generator.
@@ -72,9 +73,14 @@ class SummaryGenerator:
         Args:
             reference_version: ECOD reference version
             family_lookup: Optional dict mapping domain IDs to family names
+            classification_lookup: Optional dict mapping domain IDs to their
+                ECOD classification {x_group, h_group, t_group, f_group}. When
+                provided, these are emitted on each <hit>, enabling F-group /
+                T-group exclusion in pyecod_mini (non-circular rep validation).
         """
         self.reference_version = reference_version
         self.family_lookup = family_lookup or {}
+        self.classification_lookup = classification_lookup or {}
 
     def parse_blast_xml(self, blast_xml: str, source: str) -> List[BlastHit]:
         """
@@ -376,6 +382,8 @@ class SummaryGenerator:
         hhsearch_xml: Optional[str] = None,
         output_path: Optional[str] = None,
         batch_id: Optional[str] = None,
+        exclude_self: bool = False,
+        exclude_domain_ids: Optional[set] = None,
     ) -> str:
         """
         Generate domain summary XML from BLAST and HHsearch results.
@@ -392,10 +400,20 @@ class SummaryGenerator:
             hhsearch_xml: Path to HHsearch HHR file (optional, Phase 3)
             output_path: Output path (auto-generated if None)
             batch_id: Optional batch ID for tracking
+            exclude_self: Omit hits to the query's own structure (same PDB id),
+                producing a pre-masked summary for non-circular rep validation.
+            exclude_domain_ids: Omit hits to these reference ECOD domain ids.
 
         Returns:
             Path to generated summary XML
         """
+        exclude_domain_ids = exclude_domain_ids or set()
+        # Normalize exclude ids (match with and without leading 'e')
+        excl_ids = set()
+        for d in exclude_domain_ids:
+            excl_ids.add(d)
+            excl_ids.add(d[1:] if d.startswith("e") else d)
+        self._masked_hit_count = 0
         # Create summary XML per API spec
         root = ET.Element("domain_summary")
         root.set("version", "1.0")  # Schema version
@@ -417,18 +435,24 @@ class SummaryGenerator:
         if domain_blast_xml and os.path.exists(domain_blast_xml):
             domain_hits = self.parse_blast_xml(domain_blast_xml, "domain_blast")
             for hit in domain_hits:
+                if self._hit_excluded(hit.ecod_domain_id, pdb_id, exclude_self, excl_ids):
+                    continue
                 self._add_blast_hit(evidence, hit)
 
         # Parse chain BLAST
         if chain_blast_xml and os.path.exists(chain_blast_xml):
             chain_hits = self.parse_blast_xml(chain_blast_xml, "chain_blast")
             for hit in chain_hits:
+                if self._hit_excluded(hit.ecod_domain_id, pdb_id, exclude_self, excl_ids):
+                    continue
                 self._add_blast_hit(evidence, hit)
 
         # Parse HHsearch results (Phase 3)
         if hhsearch_xml and os.path.exists(hhsearch_xml):
             hhsearch_hits = self.parse_hhsearch_hhr(hhsearch_xml, "hhsearch")
             for hit in hhsearch_hits:
+                if self._hit_excluded(hit.ecod_domain_id, pdb_id, exclude_self, excl_ids):
+                    continue
                 self._add_hhsearch_hit(evidence, hit)
 
         # Metadata section (per API spec)
@@ -438,6 +462,13 @@ class SummaryGenerator:
             batch_elem.text = batch_id
         timestamp_elem = ET.SubElement(metadata, "timestamp")
         timestamp_elem.text = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Record evidence masking (non-circular rep validation), if any
+        if exclude_self or excl_ids:
+            masked_elem = ET.SubElement(metadata, "masked_evidence")
+            masked_elem.set("count", str(self._masked_hit_count))
+            masked_elem.set("exclude_self", str(exclude_self).lower())
+            if excl_ids:
+                masked_elem.set("exclude_domain_ids", str(len(exclude_domain_ids)))
 
         # Generate output path if not provided
         if output_path is None:
@@ -471,6 +502,59 @@ class SummaryGenerator:
             hit_elem.set("ecod_uid", str(hit.ecod_uid))
         if hit.reference_length is not None:
             hit_elem.set("reference_length", str(hit.reference_length))
+        # Classification (enables F-group / T-group exclusion in pyecod_mini)
+        self._add_classification(hit_elem, hit.ecod_domain_id)
+
+    def _hit_excluded(
+        self, ecod_domain_id: str, query_pdb: str, exclude_self: bool, excl_ids: set
+    ) -> bool:
+        """Return True if this hit should be masked from the summary.
+
+        Used for optional pre-masked summary generation (non-circular rep
+        validation). Increments self._masked_hit_count when a hit is excluded.
+        """
+        if not exclude_self and not excl_ids:
+            return False
+
+        excluded = False
+        if exclude_self:
+            hit_pdb = self._extract_hit_pdb(ecod_domain_id)
+            if hit_pdb and hit_pdb == query_pdb.lower():
+                excluded = True
+
+        if not excluded and excl_ids and ecod_domain_id:
+            normalized = ecod_domain_id[1:] if ecod_domain_id.startswith("e") else ecod_domain_id
+            if ecod_domain_id in excl_ids or normalized in excl_ids:
+                excluded = True
+
+        if excluded:
+            self._masked_hit_count += 1
+        return excluded
+
+    @staticmethod
+    def _extract_hit_pdb(ecod_domain_id: str) -> Optional[str]:
+        """Extract the lowercase PDB id from a hit's domain/chain identifier.
+
+        Handles 'e1gcyA2' (domain BLAST) -> '1gcy' and '1gcy_A' (chain BLAST) -> '1gcy'.
+        """
+        if not ecod_domain_id:
+            return None
+        s = ecod_domain_id
+        if "_" in s:  # chain BLAST "pdb_chain"
+            return s.split("_")[0].lower()
+        if s.startswith("e") and len(s) >= 5:
+            return s[1:5].lower()
+        return None
+
+    def _add_classification(self, hit_elem: ET.Element, ecod_domain_id: str):
+        """Emit x/h/t/f group attributes from the classification lookup, if present."""
+        groups = self.classification_lookup.get(ecod_domain_id)
+        if not groups:
+            return
+        for key in ("t_group", "h_group", "x_group", "f_group"):
+            val = groups.get(key)
+            if val:
+                hit_elem.set(key, val)
 
     def _add_hhsearch_hit(self, evidence: ET.Element, hit: HHsearchHit):
         """
@@ -494,6 +578,8 @@ class SummaryGenerator:
             hit_elem.set("ecod_uid", str(hit.ecod_uid))
         if hit.reference_length is not None:
             hit_elem.set("reference_length", str(hit.reference_length))
+        # Classification (enables F-group / T-group exclusion in pyecod_mini)
+        self._add_classification(hit_elem, hit.ecod_domain_id)
 
     def _write_pretty_xml(self, root: ET.Element, output_path: str):
         """

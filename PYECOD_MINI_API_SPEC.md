@@ -184,6 +184,52 @@ pyecod-mini 8ovp_A \
 
 ---
 
+## Evidence Exclusion (Non-Circular Validation) — v2.1.0
+
+To validate an **existing** ECOD representative with the algorithm, the query must
+not trivially self-match its own reference entry. The library and CLI support
+opt-in masking of reference evidence before partitioning. Default behavior is
+unchanged (no exclusion).
+
+**Library kwargs** (`partition_protein()` and `Partitioner.partition()`):
+
+```python
+partition_protein(
+    summary_xml, output_xml, pdb_id, chain_id,
+    *,
+    exclude_self: bool = False,             # drop hits to the query's own PDB id
+    exclude_domain_ids: list[str] | None = None,  # drop these reference domain ids
+    exclude_fgroups: list[str] | None = None,     # drop hits whose f_group matches
+    exclude_tgroups: list[str] | None = None,     # drop hits whose t_group matches
+)
+```
+
+**CLI flags:**
+
+```
+--exclude-self                 # drop hits to the query's own structure (same PDB id)
+--exclude-domains FILE         # newline list of reference ECOD domain ids to mask
+--exclude-fgroups FILE         # newline list of F-group ids to mask
+--exclude-tgroups FILE         # newline list of T-group ids to mask
+```
+
+- `exclude_self` masks any hit whose source PDB id equals the query's (PDB-level,
+  since all chains of the deposited structure are in the reference).
+- `exclude_domain_ids` matches a hit's `target` with or without a leading `e`.
+- `exclude_fgroups` / `exclude_tgroups` require the evidence to carry `f_group` /
+  `t_group` (emitted by pyecod_prod summaries that include classification
+  attributes — see Hit Attributes below). They are version-agnostic: masking uses
+  the hits' own classification fields.
+
+**Output additions** (partition.xml `<metadata>`):
+- `<parameter name="exclusion_policy" value="self,domains:N"/>` — the policy used
+- `<parameter name="evidence_items_masked" value="N"/>` — count of masked items
+- per-`<domain>` attribute `top_evidence_masked="true"` when masked (e.g. self-hit)
+  evidence overlapped that domain's range, confirming the assignment came from
+  independent evidence.
+
+---
+
 ## Data Formats
 
 ### Input: domain_summary.xml
@@ -250,6 +296,13 @@ pyecod-mini 8ovp_A \
 - `query_range`: Alignment range in query sequence (1-indexed, inclusive)
 - `evalue`: E-value (BLAST/HHsearch)
 - Plus type-specific attributes (bitscore, probability, etc.)
+
+**Optional Hit Attributes (classification, v2.1.0):**
+- `t_group`, `h_group`, `x_group`, `f_group`: ECOD classification ids of the hit's
+  reference domain. Emitted by pyecod_prod when a classification lookup is loaded.
+  Enable `--exclude-fgroups` / `--exclude-tgroups`. (Note: in the legacy ECOD XML
+  the element named `f_group` is actually the T-group and `pf_group` is the real
+  F-group; the lookup builder maps these to their true levels.)
 
 **Coordinate System:**
 - All ranges are **1-indexed** (first residue = 1)
