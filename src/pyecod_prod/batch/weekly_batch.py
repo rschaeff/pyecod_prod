@@ -24,6 +24,7 @@ from pyecod_prod.parsers.pdb_status import PDBStatusParser
 from pyecod_prod.slurm.blast_runner import BlastRunner
 from pyecod_prod.slurm.hhsearch_runner import HHsearchRunner
 from pyecod_prod.utils.directories import BatchDirectories, write_fasta
+from pyecod_prod.utils.classification_lookup import load_classification_lookup_for_version
 from pyecod_prod.utils.family_lookup import load_family_lookup_for_version
 
 
@@ -88,9 +89,21 @@ class WeeklyBatch:
             print(f"  WARNING: Family lookup not found: {e}")
             family_lookup = {}
 
+        # Load classification lookup (x/h/t/f group) for summary generation.
+        # Enables F-group / T-group exclusion in pyecod_mini (non-circular rep
+        # validation). Optional: gracefully degrades if the lookup is missing.
+        print(f"Loading ECOD classification lookup for {reference_version}...")
+        try:
+            classification_lookup = load_classification_lookup_for_version(reference_version)
+            print(f"  Loaded {len(classification_lookup)} domain→classification mappings")
+        except FileNotFoundError as e:
+            print(f"  WARNING: Classification lookup not found: {e}")
+            classification_lookup = {}
+
         self.summary_generator = SummaryGenerator(
             reference_version=reference_version,
-            family_lookup=family_lookup
+            family_lookup=family_lookup,
+            classification_lookup=classification_lookup,
         )
 
         # pyecod-mini path (installed in user's .local/bin)
