@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """
-Build domain → ECOD classification (x/h/t/f group ids) lookup from ECOD XML.
+Build domain → ECOD classification (x/h/t/f group ids) lookup.
 
-Reads ecod.developXXX.xml and writes a TSV mapping each ECOD domain id to its
-X/H/T/F group ids, for use by SummaryGenerator (enables F-group / T-group
-exclusion in pyecod_mini for non-circular validation of existing reps).
+Writes a TSV mapping each ECOD domain id to its X/H/T/F group ids, for use by
+SummaryGenerator (enables F-group / T-group exclusion in pyecod_mini for
+non-circular validation of existing reps).
 
-IMPORTANT — legacy XML naming oddity (since discarded):
-  In the old ECOD XML the element named ``f_group`` is actually the **T-group**,
-  and the element named ``pf_group`` (Pfam group) is actually the **F-group**.
-  This script maps them to their true meaning:
+Two input formats are supported (auto-detected by extension):
 
-    XML element / attr        true ECOD level     emitted column
-    -----------------------   -----------------   --------------
-    <x_group  x_id="1">       X-group             x_group
-    <h_group  h_id="1.1">     H-group             h_group
-    <f_group  f_id="1.1.1">   T-group             t_group
-    <pf_group pf_id="1.1.1.1">F-group (family)    f_group
+1. ECOD ``domains.txt`` (PREFERRED — the current/forward format). Columns are
+   read from the header; the numeric ``f_id`` (e.g. ``1.1.1.3`` = X.H.T.F) gives
+   all four levels directly, with correct modern naming:
+       x_group = X            (1)
+       h_group = X.H          (1.1)
+       t_group = X.H.T        (1.1.1)
+       f_group = X.H.T.F      (1.1.1.3)  -- only when f_id has 4 components
 
-Domains directly under an <f_group> with no <pf_group> have no F-group (blank).
+2. Legacy ``ecod.developXXX.xml`` (DEPRECATED — being phased out). The element
+   named ``f_group`` is actually the T-group and ``pf_group`` the real F-group;
+   this script maps them to their true meaning (see build_from_xml).
 
 Usage:
+    # domains.txt (preferred)
+    python scripts/build_classification_lookup.py \
+        /data/ecod/database_versions/v294/bulk_files/ecod.develop294.domains.txt \
+        /data/ecod/database_versions/v294/domain_classification_lookup.tsv
+
+    # legacy XML
     python scripts/build_classification_lookup.py \
         /data/ecod/database_versions/v291/ecod.develop291.xml \
         /data/ecod/database_versions/v291/domain_classification_lookup.tsv
@@ -29,22 +35,106 @@ Usage:
 import argparse
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Dict, Tuple
 
 
-def build_classification_lookup(ecod_xml: str, output_tsv: str) -> None:
-    """Parse ECOD XML and build domain → (x,h,t,f group) lookup.
+def _split_f_id(f_id: str) -> Tuple[str, str, str, str]:
+    """Split a numeric ECOD f_id (X.H.T.F) into (x_group, h_group, t_group, f_group).
+
+    Components beyond what is present are returned empty. f_group is only set when
+    the id has 4 components.
+    """
+    parts = f_id.split(".") if f_id else []
+    x_group = parts[0] if len(parts) >= 1 else ""
+    h_group = ".".join(parts[:2]) if len(parts) >= 2 else ""
+    t_group = ".".join(parts[:3]) if len(parts) >= 3 else ""
+    f_group = f_id if len(parts) >= 4 else ""
+    return x_group, h_group, t_group, f_group
+
+
+def _write_lookup(lookup: Dict[str, Tuple[str, str, str, str]], output_tsv: str) -> None:
+    """Write the domain → (x,h,t,f) lookup TSV."""
+    output_path = Path(output_tsv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_tsv, "w") as f:
+        f.write("# ECOD Domain ID to X/H/T/F group classification lookup\n")
+        f.write("ecod_domain_id\tx_group\th_group\tt_group\tf_group\n")
+        for dom_id in sorted(lookup.keys()):
+            x_id, h_id, t_id, f_id = lookup[dom_id]
+            f.write(f"{dom_id}\t{x_id}\t{h_id}\t{t_id}\t{f_id}\n")
+    print(f"Wrote {len(lookup):,} mappings to {output_tsv}")
+
+
+def build_from_domains_txt(domains_txt: str, output_tsv: str) -> None:
+    """Build the classification lookup from an ECOD domains.txt file.
+
+    Header is located by finding the line containing both ``ecod_domain_id`` and
+    ``f_id``; column positions are read from it (robust to column reordering).
+    """
+    print(f"Parsing {domains_txt}...")
+
+    lookup: Dict[str, Tuple[str, str, str, str]] = {}
+    id_col = f_col = None
+
+    with open(domains_txt) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+
+            if id_col is None:
+                # Look for the header row (uncommented, contains the field names)
+                cols = line.lstrip("#").strip().split("\t")
+                if "ecod_domain_id" in cols and "f_id" in cols:
+                    id_col = cols.index("ecod_domain_id")
+                    f_col = cols.index("f_id")
+                continue
+
+            if line.startswith("#"):
+                continue
+
+            fields = line.split("\t")
+            if len(fields) <= max(id_col, f_col):
+                continue
+
+            dom_id = fields[id_col].strip()
+            f_id = fields[f_col].strip()
+            if not dom_id:
+                continue
+
+            lookup[dom_id] = _split_f_id(f_id)
+
+    if id_col is None:
+        raise ValueError(
+            f"Could not find a header row with 'ecod_domain_id' and 'f_id' in {domains_txt}"
+        )
+
+    domains_with_fgroup = sum(1 for g in lookup.values() if g[3])
+    print(
+        f"Mapped {len(lookup):,} domains "
+        f"({domains_with_fgroup:,} with a 4-level F-group)"
+    )
+    _write_lookup(lookup, output_tsv)
+
+
+def build_from_xml(ecod_xml: str, output_tsv: str) -> None:
+    """Parse legacy ECOD XML and build domain → (x,h,t,f group) lookup.
+
+    DEPRECATED: the ecod.developXXX.xml format is being phased out; prefer
+    build_from_domains_txt. Retained for older versions (e.g. v291) that only
+    ship the XML. Handles the legacy naming oddity (f_group=T, pf_group=F).
 
     Args:
         ecod_xml: Path to ecod.developXXX.xml
         output_tsv: Path to output TSV file
     """
-    print(f"Parsing {ecod_xml}...")
+    print(f"Parsing {ecod_xml} (legacy XML format)...")
 
     tree = ET.parse(ecod_xml)
     root = tree.getroot()
 
     # domain_id -> (x_group, h_group, t_group, f_group)
-    lookup: dict[str, tuple[str, str, str, str]] = {}
+    lookup: Dict[str, Tuple[str, str, str, str]] = {}
     domains_with_fgroup = 0
 
     for x_group in root.findall(".//x_group"):
@@ -75,29 +165,34 @@ def build_classification_lookup(ecod_xml: str, output_tsv: str) -> None:
         f"Mapped {len(lookup):,} domains "
         f"({domains_with_fgroup:,} with an F-group / pf_group)"
     )
-
-    output_path = Path(output_tsv)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_tsv, "w") as f:
-        f.write("# ECOD Domain ID to X/H/T/F group classification lookup\n")
-        f.write("# Generated from ECOD XML (f_group=T-group, pf_group=F-group)\n")
-        f.write("ecod_domain_id\tx_group\th_group\tt_group\tf_group\n")
-        for dom_id in sorted(lookup.keys()):
-            x_id, h_id, t_id, f_id = lookup[dom_id]
-            f.write(f"{dom_id}\t{x_id}\t{h_id}\t{t_id}\t{f_id}\n")
-
-    print(f"Wrote {len(lookup):,} mappings to {output_tsv}")
+    _write_lookup(lookup, output_tsv)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build domain → ECOD classification (x/h/t/f) lookup from ECOD XML"
+        description="Build domain → ECOD classification (x/h/t/f) lookup "
+        "from an ECOD domains.txt (preferred) or legacy ecod.developXXX.xml"
     )
-    parser.add_argument("ecod_xml", help="Path to ecod.developXXX.xml")
+    parser.add_argument(
+        "input", help="Path to ECOD domains.txt (preferred) or ecod.developXXX.xml"
+    )
     parser.add_argument("output_tsv", help="Path to output TSV file")
+    parser.add_argument(
+        "--format",
+        choices=["auto", "domains", "xml"],
+        default="auto",
+        help="Input format (default: auto-detect by extension)",
+    )
     args = parser.parse_args()
-    build_classification_lookup(args.ecod_xml, args.output_tsv)
+
+    fmt = args.format
+    if fmt == "auto":
+        fmt = "xml" if args.input.lower().endswith(".xml") else "domains"
+
+    if fmt == "xml":
+        build_from_xml(args.input, args.output_tsv)
+    else:
+        build_from_domains_txt(args.input, args.output_tsv)
 
 
 if __name__ == "__main__":
