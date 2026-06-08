@@ -107,6 +107,10 @@ class PartitionRunner:
         output_dir: str,
         batch_id: Optional[str] = None,
         blast_dir: Optional[str] = None,
+        exclude_self: bool = False,
+        exclude_domain_ids: Optional[List[str]] = None,
+        exclude_fgroups: Optional[List[str]] = None,
+        exclude_tgroups: Optional[List[str]] = None,
     ) -> PartitionResult:
         """
         Run pyecod-mini on a summary XML file.
@@ -117,6 +121,11 @@ class PartitionRunner:
             batch_id: Optional batch ID for tracking
             blast_dir: Optional path to directory containing BLAST XML files
                        (enables chain BLAST decomposition)
+            exclude_self: Exclude hits to the query's own structure (non-circular
+                       validation of existing reps).
+            exclude_domain_ids: Exclude hits to these reference ECOD domain ids.
+            exclude_fgroups: Exclude hits whose F-group is in this list.
+            exclude_tgroups: Exclude hits whose T-group is in this list.
 
         Returns:
             PartitionResult with domains, coverage, and ECOD quality assessment
@@ -145,6 +154,10 @@ class PartitionRunner:
                 chain_id=chain_id,
                 seq_len=seq_len,
                 blast_dir=blast_dir,
+                exclude_self=exclude_self,
+                exclude_domain_ids=exclude_domain_ids,
+                exclude_fgroups=exclude_fgroups,
+                exclude_tgroups=exclude_tgroups,
             )
         else:
             result = self._partition_via_cli(
@@ -155,6 +168,10 @@ class PartitionRunner:
                 chain_id=chain_id,
                 seq_len=seq_len,
                 blast_dir=blast_dir,
+                exclude_self=exclude_self,
+                exclude_domain_ids=exclude_domain_ids,
+                exclude_fgroups=exclude_fgroups,
+                exclude_tgroups=exclude_tgroups,
             )
 
         return result
@@ -168,6 +185,10 @@ class PartitionRunner:
         chain_id: str,
         seq_len: int,
         blast_dir: Optional[str] = None,
+        exclude_self: bool = False,
+        exclude_domain_ids: Optional[List[str]] = None,
+        exclude_fgroups: Optional[List[str]] = None,
+        exclude_tgroups: Optional[List[str]] = None,
     ) -> PartitionResult:
         """
         Call pyecod_mini library API.
@@ -183,6 +204,10 @@ class PartitionRunner:
                 chain_id=chain_id,
                 batch_id=batch_id,
                 blast_dir=blast_dir,  # Pass BLAST directory for alignment data
+                exclude_self=exclude_self,
+                exclude_domain_ids=exclude_domain_ids,
+                exclude_fgroups=exclude_fgroups,
+                exclude_tgroups=exclude_tgroups,
             )
 
             # Convert pyecod_mini domains to pyecod_prod format
@@ -265,12 +290,18 @@ class PartitionRunner:
         chain_id: str,
         seq_len: int,
         blast_dir: Optional[str] = None,
+        exclude_self: bool = False,
+        exclude_domain_ids: Optional[List[str]] = None,
+        exclude_fgroups: Optional[List[str]] = None,
+        exclude_tgroups: Optional[List[str]] = None,
     ) -> PartitionResult:
         """
         Call pyecod_mini CLI via subprocess.
 
         Fallback when library not available.
         """
+        import tempfile
+
         # Build command
         cmd = [
             self.pyecod_mini_path,
@@ -284,6 +315,28 @@ class PartitionRunner:
         if batch_id:
             cmd.extend(["--batch-id", batch_id])
 
+        # Exclusion options. The CLI takes files for the id-list flags, so write
+        # temp files for any lists supplied via the library-style API.
+        tmp_files: List[str] = []
+
+        def _write_list(ids: List[str]) -> str:
+            fh = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, prefix="exclude_"
+            )
+            fh.write("\n".join(ids))
+            fh.close()
+            tmp_files.append(fh.name)
+            return fh.name
+
+        if exclude_self:
+            cmd.append("--exclude-self")
+        if exclude_domain_ids:
+            cmd.extend(["--exclude-domains", _write_list(exclude_domain_ids)])
+        if exclude_fgroups:
+            cmd.extend(["--exclude-fgroups", _write_list(exclude_fgroups)])
+        if exclude_tgroups:
+            cmd.extend(["--exclude-tgroups", _write_list(exclude_tgroups)])
+
         # Note: CLI doesn't support --blast-dir yet, will infer from summary-xml path
         # blast_dir parameter accepted for API consistency but not used in CLI mode
 
@@ -296,25 +349,27 @@ class PartitionRunner:
                 timeout=300,  # 5 minute timeout
                 check=False,  # Don't raise on non-zero exit
             )
-
-            if result.returncode != 0:
-                error_msg = f"CLI failed (exit {result.returncode}): {result.stderr}"
-                logger.error(f"{pdb_id}_{chain_id}: {error_msg}")
-
-                return PartitionResult(
-                    pdb_id=pdb_id,
-                    chain_id=chain_id,
-                    sequence_length=seq_len,
-                    domains=[],
-                    domain_count=0,
-                    partition_coverage=0.0,
-                    partition_quality="failed",
-                    partition_xml_path=str(partition_xml),
-                    error_message=error_msg,
-                )
-
         except subprocess.TimeoutExpired:
+            self._cleanup_temp_files(tmp_files)
             error_msg = "CLI timed out after 5 minutes"
+            logger.error(f"{pdb_id}_{chain_id}: {error_msg}")
+
+            return PartitionResult(
+                pdb_id=pdb_id,
+                chain_id=chain_id,
+                sequence_length=seq_len,
+                domains=[],
+                domain_count=0,
+                partition_coverage=0.0,
+                partition_quality="failed",
+                partition_xml_path=str(partition_xml),
+                error_message=error_msg,
+            )
+
+        self._cleanup_temp_files(tmp_files)
+
+        if result.returncode != 0:
+            error_msg = f"CLI failed (exit {result.returncode}): {result.stderr}"
             logger.error(f"{pdb_id}_{chain_id}: {error_msg}")
 
             return PartitionResult(
@@ -374,6 +429,15 @@ class PartitionRunner:
             algorithm_version=algo_version,
             error_message=None,
         )
+
+    @staticmethod
+    def _cleanup_temp_files(paths: List[str]) -> None:
+        """Remove temporary exclusion-list files written for the CLI fallback."""
+        for p in paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     def _parse_summary_metadata(self, summary_xml: str) -> tuple:
         """
