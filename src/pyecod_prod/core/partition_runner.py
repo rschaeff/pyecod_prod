@@ -97,11 +97,40 @@ class PartitionRunner:
         self.reference_lengths_file = reference_lengths_file
         self.protein_lengths_file = protein_lengths_file
 
+        # When reference CSVs are configured, route library partitioning through a
+        # cached pyecod_mini Partitioner that loads the (multi-million-row) reference
+        # data ONCE and reuses it across all calls, instead of partition_protein()
+        # reloading it per chain (~60-120 s each). Same result, feasible at batch scale.
+        self._use_cached = self.use_library and bool(
+            domain_definitions_file or reference_lengths_file or protein_lengths_file
+        )
+        self._partitioner = None  # built lazily on first partition()
+
         if self.use_library:
-            logger.info("pyecod_mini library available - using library API")
+            if self._use_cached:
+                logger.info(
+                    "pyecod_mini library available - using cached Partitioner "
+                    "(reference data loaded once)"
+                )
+            else:
+                logger.info("pyecod_mini library available - using library API")
         else:
             logger.info("pyecod_mini library not available - using CLI fallback")
             self._verify_cli_available()
+
+    def _get_partitioner(self):
+        """Lazily build a cached Partitioner with the version reference data loaded once."""
+        if self._partitioner is None:
+            from pyecod_mini import Partitioner
+
+            partitioner = Partitioner()
+            partitioner.load_references(
+                domain_definitions_file=self.domain_definitions_file,
+                reference_lengths_file=self.reference_lengths_file,
+                protein_lengths_file=self.protein_lengths_file,
+            )
+            self._partitioner = partitioner
+        return self._partitioner
 
     def _verify_cli_available(self):
         """Verify pyecod-mini CLI is available."""
@@ -212,22 +241,37 @@ class PartitionRunner:
         This is the preferred method - better error handling, no subprocess overhead.
         """
         try:
-            # Call pyecod_mini library
-            mini_result = partition_protein(
-                summary_xml=summary_xml,
-                output_xml=partition_xml,
-                pdb_id=pdb_id,
-                chain_id=chain_id,
-                batch_id=batch_id,
-                blast_dir=blast_dir,  # Pass BLAST directory for alignment data
-                exclude_self=exclude_self,
-                exclude_domain_ids=exclude_domain_ids,
-                exclude_fgroups=exclude_fgroups,
-                exclude_tgroups=exclude_tgroups,
-                domain_definitions_file=self.domain_definitions_file,
-                reference_lengths_file=self.reference_lengths_file,
-                protein_lengths_file=self.protein_lengths_file,
-            )
+            # Call pyecod_mini library. With reference CSVs configured, use the cached
+            # Partitioner (loads references once); otherwise per-call partition_protein.
+            if self._use_cached:
+                mini_result = self._get_partitioner().partition(
+                    summary_xml=str(summary_xml),
+                    output_xml=str(partition_xml),
+                    pdb_id=pdb_id,
+                    chain_id=chain_id,
+                    batch_id=batch_id,
+                    blast_dir=blast_dir,
+                    exclude_self=exclude_self,
+                    exclude_domain_ids=exclude_domain_ids,
+                    exclude_fgroups=exclude_fgroups,
+                    exclude_tgroups=exclude_tgroups,
+                )
+            else:
+                mini_result = partition_protein(
+                    summary_xml=summary_xml,
+                    output_xml=partition_xml,
+                    pdb_id=pdb_id,
+                    chain_id=chain_id,
+                    batch_id=batch_id,
+                    blast_dir=blast_dir,  # Pass BLAST directory for alignment data
+                    exclude_self=exclude_self,
+                    exclude_domain_ids=exclude_domain_ids,
+                    exclude_fgroups=exclude_fgroups,
+                    exclude_tgroups=exclude_tgroups,
+                    domain_definitions_file=self.domain_definitions_file,
+                    reference_lengths_file=self.reference_lengths_file,
+                    protein_lengths_file=self.protein_lengths_file,
+                )
 
             # Convert pyecod_mini domains to pyecod_prod format
             domains = [
