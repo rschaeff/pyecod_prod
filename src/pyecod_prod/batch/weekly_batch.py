@@ -24,8 +24,15 @@ from pyecod_prod.parsers.pdb_status import PDBStatusParser
 from pyecod_prod.slurm.blast_runner import BlastRunner
 from pyecod_prod.slurm.hhsearch_runner import HHsearchRunner
 from pyecod_prod.utils.directories import BatchDirectories, write_fasta
-from pyecod_prod.utils.classification_lookup import load_classification_lookup_for_version
-from pyecod_prod.utils.family_lookup import load_family_lookup_for_version
+from pyecod_prod.utils.classification_lookup import (
+    load_classification_lookup,
+    load_classification_lookup_for_version,
+)
+from pyecod_prod.utils.family_lookup import (
+    load_family_lookup,
+    load_family_lookup_for_version,
+)
+from pyecod_prod.utils.reference_config import ReferenceConfig
 
 
 class WeeklyBatch:
@@ -44,7 +51,7 @@ class WeeklyBatch:
         release_date: str,
         pdb_status_dir: str,
         base_path: str = DEFAULT_BASE_PATH,
-        reference_version: str = "develop291",
+        reference_version: str = "v294.2",
         chain_db: Optional[str] = None,
         domain_db: Optional[str] = None,
     ):
@@ -71,6 +78,15 @@ class WeeklyBatch:
         self.batch_path = Path(base_path) / self.batch_name
         self.dirs = BatchDirectories(str(self.batch_path))
 
+        # Resolve all reference paths for this version from the registry (single
+        # source of truth). Keeps BLAST/HHsearch DBs, lookups and the pyecod_mini
+        # reference CSVs on the same ECOD version (no silent version mismatch).
+        try:
+            self.reference = ReferenceConfig.load(reference_version)
+        except (KeyError, FileNotFoundError) as e:
+            print(f"  WARNING: reference registry lookup failed for {reference_version}: {e}")
+            self.reference = None
+
         # Initialize components
         self.pdb_parser = PDBStatusParser()
         self.blast_runner = BlastRunner(
@@ -80,10 +96,13 @@ class WeeklyBatch:
         )
         self.hhsearch_runner = HHsearchRunner(reference_version=reference_version)
 
-        # Load family lookup for summary generation
+        # Load family lookup for summary generation (registry path preferred).
         print(f"Loading ECOD family lookup for {reference_version}...")
         try:
-            family_lookup = load_family_lookup_for_version(reference_version)
+            if self.reference and self.reference.family_lookup:
+                family_lookup = load_family_lookup(self.reference.family_lookup)
+            else:
+                family_lookup = load_family_lookup_for_version(reference_version)
             print(f"  Loaded {len(family_lookup)} domain→family mappings")
         except FileNotFoundError as e:
             print(f"  WARNING: Family lookup not found: {e}")
@@ -94,7 +113,12 @@ class WeeklyBatch:
         # validation). Optional: gracefully degrades if the lookup is missing.
         print(f"Loading ECOD classification lookup for {reference_version}...")
         try:
-            classification_lookup = load_classification_lookup_for_version(reference_version)
+            if self.reference and self.reference.classification_lookup:
+                classification_lookup = load_classification_lookup(
+                    self.reference.classification_lookup
+                )
+            else:
+                classification_lookup = load_classification_lookup_for_version(reference_version)
             print(f"  Loaded {len(classification_lookup)} domain→classification mappings")
         except FileNotFoundError as e:
             print(f"  WARNING: Classification lookup not found: {e}")
@@ -106,9 +130,15 @@ class WeeklyBatch:
             classification_lookup=classification_lookup,
         )
 
-        # pyecod-mini path (installed in user's .local/bin)
+        # pyecod-mini path (installed in user's .local/bin). Pass the version's
+        # reference CSVs so pyecod_mini partitions against the same ECOD version.
         pyecod_mini_path = "/home/rschaeff/.local/bin/pyecod-mini"
-        self.partition_runner = PartitionRunner(pyecod_mini_path=pyecod_mini_path)
+        self.partition_runner = PartitionRunner(
+            pyecod_mini_path=pyecod_mini_path,
+            domain_definitions_file=(self.reference.domain_definitions_csv if self.reference else None),
+            reference_lengths_file=(self.reference.domain_lengths_csv if self.reference else None),
+            protein_lengths_file=(self.reference.protein_lengths_csv if self.reference else None),
+        )
 
         # Initialize or load manifest
         self.manifest = BatchManifest(str(self.batch_path))

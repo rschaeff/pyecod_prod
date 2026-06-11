@@ -57,7 +57,7 @@ def load_classification_lookup(tsv_path: str) -> ClassificationLookup:
     return lookup
 
 
-def get_default_lookup_path(reference_version: str = "develop291") -> str:
+def get_default_lookup_path(reference_version: str = "v294.2") -> str:
     """Get default path to the classification lookup for a reference version."""
     if reference_version.startswith("develop"):
         version_num = reference_version.replace("develop", "")
@@ -69,7 +69,7 @@ def get_default_lookup_path(reference_version: str = "develop291") -> str:
 
 
 def load_classification_lookup_for_version(
-    reference_version: str = "develop291",
+    reference_version: str = "v294.2",
 ) -> ClassificationLookup:
     """Load classification lookup for a specific ECOD version.
 

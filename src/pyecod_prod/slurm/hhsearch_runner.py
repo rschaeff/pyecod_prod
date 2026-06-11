@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from pyecod_prod.utils.reference_config import ReferenceConfig
+
+
 class HHsearchRunner:
     """
     Run HHsearch via SLURM job arrays.
@@ -21,7 +24,9 @@ class HHsearchRunner:
     providing more sensitive profile-to-profile searches.
     """
 
-    # HHsearch database (v291)
+    # HHsearch database — last-resort fallback only. Authoritative path comes from
+    # the reference registry, resolved per reference_version in __init__, so the
+    # HHsearch DB always matches the configured ECOD version (no silent mismatch).
     # Note: HHsearch automatically appends _hhm.ffdata and _hhm.ffindex
     HHSEARCH_DB = "/data/ecod/database_versions/v291/ecod_v291"
 
@@ -32,7 +37,7 @@ class HHsearchRunner:
 
     def __init__(
         self,
-        reference_version: str = "develop291",
+        reference_version: str = "v294.2",
         hhsearch_db: Optional[str] = None,
     ):
         """
@@ -44,8 +49,15 @@ class HHsearchRunner:
         """
         self.reference_version = reference_version
 
-        # Allow database override for testing
-        self.hhsearch_db = hhsearch_db or self.HHSEARCH_DB
+        # Resolve from the reference registry so the HHsearch DB matches the
+        # configured ECOD version. Explicit override wins; registry next; the
+        # hardcoded constant is a last resort if the registry lookup fails.
+        try:
+            reg_hh = ReferenceConfig.load(reference_version).hhsearch_db
+        except (KeyError, FileNotFoundError):
+            reg_hh = None
+
+        self.hhsearch_db = hhsearch_db or reg_hh or self.HHSEARCH_DB
 
         # Verify database exists
         if not self._check_hhsearch_db(self.hhsearch_db):

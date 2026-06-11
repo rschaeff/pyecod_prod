@@ -1,0 +1,61 @@
+# ECOD reference-version registry — single source of truth for reference paths.
+#
+# Why a declarative registry (not string-munging a version): filename infixes are
+# irregular across ECOD releases (develop291 vs v294.2 vs ecod_v294_2_F40), so no
+# formula resolves all paths. Each version lists every artifact explicitly.
+#
+# All pipeline components (BLAST/HHsearch runners, summary lookups, and the paths
+# handed to pyecod_mini) resolve their reference paths from this file via
+# pyecod_prod.utils.reference_config.ReferenceConfig.
+#
+# To add a release: add a versions: entry; no code change required.
+# A null value means "not applicable / use the consumer's built-in default".
+
+# Canonical version used when none is specified.
+default: v294.2
+
+# Aliases → canonical version key (back-compat for the develop291 string).
+aliases:
+  develop291: v291
+  develop294: v294
+  v294_2: v294.2
+
+versions:
+  v291:
+    # pyecod_mini ships this version's reference CSVs as its bundled test_data,
+    # so the *_csv fields below are intentionally null and verify() does not
+    # require them (preserves historical v291 behavior).
+    mini_bundled: true
+    # Filename infix used in legacy domain_summary filenames (mini batch detection).
+    summary_suffix: develop291
+    # BLAST databases (prefix; BLAST appends .p* volume files).
+    blast_chain_db: /data/ecod/database_versions/v291/chainwise100.develop291
+    blast_domain_db: /data/ecod/database_versions/v291/ecod100.develop291
+    # HHsearch DB prefix (HHsearch appends _hhm.ffdata / _hhm.ffindex).
+    hhsearch_db: /data/ecod/database_versions/v291/ecod_v291
+    # ECOD bulk inputs / derived lookups.
+    domains_txt: null
+    range_cache: /data/ecod/database_versions/v291/ecod.develop291.range_cache.txt
+    family_lookup: /data/ecod/database_versions/v291/domain_family_lookup.tsv
+    classification_lookup: /data/ecod/database_versions/v291/domain_classification_lookup.tsv
+    # pyecod_mini reference CSVs. null → mini falls back to its bundled test_data
+    # (preserves current v291 behavior).
+    domain_definitions_csv: null
+    domain_lengths_csv: null
+    protein_lengths_csv: null
+
+  v294.2:
+    summary_suffix: develop291
+    # BLAST DBs to be built (makeblastdb) under v294.2/blast/.
+    blast_chain_db: /data/ecod/database_versions/v294.2/blast/chainwise100.v294_2
+    blast_domain_db: /data/ecod/database_versions/v294.2/blast/ecod100.v294_2
+    # HHsearch DB — built and validated (PDB-F40 profiles, PSIPRED SS).
+    hhsearch_db: /data/ecod/database_versions/v294.2/hhsuite_db/db/ecod_v294_2_F40
+    domains_txt: /data/ecod/database_versions/v294.2/bulk_files/ecod.v294.2.domains.txt
+    range_cache: null  # not needed; mini reference CSVs already generated
+    family_lookup: /data/ecod/database_versions/v294.2/domain_family_lookup.tsv
+    classification_lookup: /data/ecod/database_versions/v294.2/domain_classification_lookup.tsv
+    # pyecod_mini reference CSVs (canonicalized from the v294.2 release build).
+    domain_definitions_csv: /data/ecod/database_versions/v294.2/reference/domain_definitions.csv
+    domain_lengths_csv: /data/ecod/database_versions/v294.2/reference/domain_lengths.csv
+    protein_lengths_csv: /data/ecod/database_versions/v294.2/reference/protein_lengths.csv

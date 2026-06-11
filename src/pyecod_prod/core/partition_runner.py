@@ -70,16 +70,32 @@ class PartitionRunner:
     See PYECOD_MINI_API_SPEC.md for API contract.
     """
 
-    def __init__(self, pyecod_mini_path: str = "pyecod-mini", use_library: bool = True):
+    def __init__(
+        self,
+        pyecod_mini_path: str = "pyecod-mini",
+        use_library: bool = True,
+        domain_definitions_file: Optional[str] = None,
+        reference_lengths_file: Optional[str] = None,
+        protein_lengths_file: Optional[str] = None,
+    ):
         """
         Initialize partition runner.
 
         Args:
             pyecod_mini_path: Path to pyecod-mini CLI executable (fallback)
             use_library: Prefer library API if available (default: True)
+            domain_definitions_file: Reference CSV to pass to pyecod_mini so it
+                partitions against the same ECOD version as the rest of the
+                pipeline (resolved from the reference registry by WeeklyBatch).
+                When None, pyecod_mini uses its bundled defaults.
+            reference_lengths_file: Domain lengths CSV (same purpose).
+            protein_lengths_file: Protein lengths CSV (same purpose).
         """
         self.pyecod_mini_path = pyecod_mini_path
         self.use_library = use_library and LIBRARY_AVAILABLE
+        self.domain_definitions_file = domain_definitions_file
+        self.reference_lengths_file = reference_lengths_file
+        self.protein_lengths_file = protein_lengths_file
 
         if self.use_library:
             logger.info("pyecod_mini library available - using library API")
@@ -208,6 +224,9 @@ class PartitionRunner:
                 exclude_domain_ids=exclude_domain_ids,
                 exclude_fgroups=exclude_fgroups,
                 exclude_tgroups=exclude_tgroups,
+                domain_definitions_file=self.domain_definitions_file,
+                reference_lengths_file=self.reference_lengths_file,
+                protein_lengths_file=self.protein_lengths_file,
             )
 
             # Convert pyecod_mini domains to pyecod_prod format

@@ -86,7 +86,7 @@ class BatchManifest:
         batch_type: str,
         release_date: str,
         pdb_status_path: str,
-        reference_version: str = "develop291",
+        reference_version: str = "v294.2",
     ):
         """
         Initialize a new batch with metadata.
