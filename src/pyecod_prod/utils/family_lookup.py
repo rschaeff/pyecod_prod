@@ -44,7 +44,7 @@ def load_family_lookup(tsv_path: str) -> Dict[str, str]:
     return lookup
 
 
-def get_default_lookup_path(reference_version: str = "develop291") -> str:
+def get_default_lookup_path(reference_version: str = "v294.2") -> str:
     """
     Get default path to family lookup file for a reference version.
 
@@ -64,7 +64,7 @@ def get_default_lookup_path(reference_version: str = "develop291") -> str:
     return f"/data/ecod/database_versions/{version_dir}/domain_family_lookup.tsv"
 
 
-def load_family_lookup_for_version(reference_version: str = "develop291") -> Dict[str, str]:
+def load_family_lookup_for_version(reference_version: str = "v294.2") -> Dict[str, str]:
     """
     Load family lookup for a specific ECOD version.
 

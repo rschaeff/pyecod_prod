@@ -63,7 +63,7 @@ class SummaryGenerator:
 
     def __init__(
         self,
-        reference_version: str = "develop291",
+        reference_version: str = "v294.2",
         family_lookup: Optional[Dict[str, str]] = None,
         classification_lookup: Optional[Dict[str, Dict[str, str]]] = None,
     ):

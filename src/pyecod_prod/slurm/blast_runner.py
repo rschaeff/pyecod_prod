@@ -13,6 +13,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from pyecod_prod.utils.reference_config import ReferenceConfig
+
 
 class BlastRunner:
     """
@@ -22,7 +24,8 @@ class BlastRunner:
     monitors completion, and parses coverage from results.
     """
 
-    # BLAST databases (v291)
+    # BLAST databases — last-resort fallback only. Authoritative paths come from
+    # the reference registry, resolved per reference_version in __init__.
     CHAIN_DB = "/data/ecod/database_versions/v291/chainwise100.develop291"
     DOMAIN_DB = "/data/ecod/database_versions/v291/ecod100.develop291"
 
@@ -33,7 +36,7 @@ class BlastRunner:
 
     def __init__(
         self,
-        reference_version: str = "develop291",
+        reference_version: str = "v294.2",
         chain_db: Optional[str] = None,
         domain_db: Optional[str] = None,
     ):
@@ -47,9 +50,17 @@ class BlastRunner:
         """
         self.reference_version = reference_version
 
-        # Allow database override for testing
-        self.chain_db = chain_db or self.CHAIN_DB
-        self.domain_db = domain_db or self.DOMAIN_DB
+        # Resolve DB paths from the reference registry (keeps BLAST consistent with
+        # the configured ECOD version). Explicit overrides win; registry next;
+        # hardcoded constants are a last resort if the registry lookup fails.
+        try:
+            ref = ReferenceConfig.load(reference_version)
+            reg_chain, reg_domain = ref.blast_chain_db, ref.blast_domain_db
+        except (KeyError, FileNotFoundError):
+            reg_chain = reg_domain = None
+
+        self.chain_db = chain_db or reg_chain or self.CHAIN_DB
+        self.domain_db = domain_db or reg_domain or self.DOMAIN_DB
 
         # Verify databases exist
         if not self._check_blast_db(self.chain_db):
@@ -58,8 +69,12 @@ class BlastRunner:
             raise FileNotFoundError(f"Domain BLAST database not found: {self.domain_db}")
 
     def _check_blast_db(self, db_path: str) -> bool:
-        """Check if BLAST database files exist"""
-        return Path(f"{db_path}.psq").exists()
+        """Check if BLAST database files exist (single- or multi-volume)."""
+        return (
+            Path(f"{db_path}.psq").exists()
+            or Path(f"{db_path}.00.psq").exists()
+            or Path(f"{db_path}.pdb").exists()  # newer makeblastdb metadata file
+        )
 
     def create_blast_script(
         self,

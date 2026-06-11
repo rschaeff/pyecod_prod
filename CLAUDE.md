@@ -148,6 +148,34 @@ else:
 
 ## Critical Configuration
 
+### Reference Version Registry (single source of truth)
+
+All reference paths (BLAST DBs, HHsearch DB, family/classification lookups, and the
+reference CSVs handed to pyecod_mini) are resolved from one declarative registry —
+`src/pyecod_prod/config/references.yaml` — keyed by canonical version (`v291`,
+`v294.2`; `develop291` is an alias for `v291`). This replaced ad-hoc per-component
+hardcoding, which had let the HHsearch DB drift to a different ECOD version than the
+BLAST DBs / lookups (a correctness hazard on reclassification releases).
+
+```python
+from pyecod_prod.utils.reference_config import ReferenceConfig
+ref = ReferenceConfig.load("v294.2")   # or "develop291"; default = registry `default:`
+ref.verify()                            # assert every required artifact exists
+ref.blast_chain_db, ref.hhsearch_db, ref.classification_lookup, ref.domain_definitions_csv
+```
+
+- `BlastRunner` / `HHsearchRunner` / `WeeklyBatch` / `PartitionRunner` resolve their
+  paths from the registry per `reference_version`, so the whole pipeline stays on one
+  ECOD version. The hardcoded DB constants are last-resort fallbacks only.
+- **Default version is `v294.2`** (registry `default:` and component defaults).
+- `pyecod_mini` (>=2.2.0) accepts reference-CSV overrides; prod passes the version's
+  CSVs so the partitioner uses the same ECOD version (not mini's bundled test_data).
+- **Adding a release**: add a `versions:` entry to `references.yaml` (build its BLAST
+  DBs, classification lookup, and mini CSVs first) — no code change. `mini_bundled:
+  true` marks a version whose CSVs pyecod_mini already ships (so they may be null).
+- Build the classification lookup with `scripts/build_classification_lookup.py`
+  (prefers `bulk_files/<...>.domains.txt`).
+
 ### Database Locations
 
 **BLAST Databases (ECOD v291)**:
