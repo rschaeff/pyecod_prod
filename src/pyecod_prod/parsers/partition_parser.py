@@ -247,18 +247,27 @@ def generate_ecod_domain_id(pdb_id: str, chain_id: str, domain_num: int) -> str:
     """
     Generate ECOD-style domain ID.
 
-    Format: e{pdb_id}{chain_id}{domain_num}
-    Example: e9qf6BA1
+    Format: e{pdb_id}{chain_id}{domain_num} for single-character chains.
+    For MULTI-character chains a '_' separator is inserted before the domain
+    number to avoid id collisions: without it, chain 'B1' domain 1 and chain 'B'
+    domain 11 both render as 'e{pdb}B11'. With the separator, chain 'B1' domain 1
+    becomes 'e{pdb}B1_1' while chain 'B' domain 11 stays 'e{pdb}B11'.
+    Examples: e1abcA1 (chain A, dom 1); e8qo9B1_1 (chain B1, dom 1).
+
+    NB: legacy multi-char-chain ids (pre-v295) were written without the
+    separator; only the 12 known active collisions were retroactively renamed.
+    A full backfill of legacy multi-char ids is deferred.
 
     Args:
         pdb_id: PDB ID (e.g., "9qf6")
         chain_id: Chain ID (e.g., "BA")
-        domain_num: Domain number (1-indexed)
+        domain_num: Domain number (1-indexed; never zero-padded)
 
     Returns:
         ECOD domain ID string
     """
-    return f"e{pdb_id}{chain_id}{domain_num}"
+    sep = "_" if len(chain_id) > 1 else ""
+    return f"e{pdb_id}{chain_id}{sep}{domain_num}"
 
 
 def partition_to_domain_data(

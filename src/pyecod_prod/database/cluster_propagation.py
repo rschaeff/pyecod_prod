@@ -343,8 +343,11 @@ class ClusterPropagator:
 
             for i, rep_domain in enumerate(rep_domains, 1):
                 # Generate domain ID for member
-                # Replace the representative's PDB/chain with member's
-                member_domain_id = f"e{member_pdb_id.lower()}{member_chain_id}{i}"
+                # Replace the representative's PDB/chain with member's.
+                # Multi-char chains get a '_' separator before the ordinal to avoid
+                # id collisions (see parsers.generate_ecod_domain_id).
+                _sep = "_" if len(member_chain_id) > 1 else ""
+                member_domain_id = f"e{member_pdb_id.lower()}{member_chain_id}{_sep}{i}"
 
                 # Transform range definition for member chain
                 # Replace rep chain prefix with member chain prefix
