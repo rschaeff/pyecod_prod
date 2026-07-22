@@ -464,40 +464,48 @@ class AutoAccessionLoader:
                     + ". Accessioning would propagate a dead/unclassified reference.")
         return None
 
-    def _check_range_type(self, range_type: Optional[str]) -> Optional[str]:
-        """Return a rejection message if this range must not be accessioned, else None.
+    def _check_ranges(
+        self,
+        range_type: Optional[str],
+        pdb_range: Optional[str],
+        source_type: str = "pdb",
+    ) -> Optional[str]:
+        """Return a rejection message if the ranges are unfit to accession, else None.
 
-        ECOD's canonical range_definition is in AUTHOR (PDB) residue numbering. pyecod_mini
-        works internally in seqid (1-based over SEQRES) and its writer now declares which
-        system it emitted via the partition XML's range_type attribute.
+        ECOD stores two coordinate systems in two places:
 
-        - "author"  -> safe.
-        - "seqid"   -> the writer could not build a seqid->author map. On any chain whose
-                       author numbering is offset from seqid, such a range points at the
-                       WRONG residues. Reject.
-        - None      -> a partition XML written before range_type existed. These are the
-                       XMLs that produced ~124k mis-numbered domains, so they are rejected
-                       by default. Set allow_unknown_range_type=True to process them
-                       deliberately (e.g. when re-accessioning a known-good legacy batch).
+          ecod_commons.domains.range_definition       -> SEQID  (1-based over SEQRES)
+          ecod_commons.domain_ranges.range_definition -> PDB     (author numbering)
+
+        POLICY: a PDB classification must supply BOTH. Supplying one and copying it to
+        both tables is wrong in either direction -- it either mislabels seqid as author
+        in domain_ranges, or writes author numbering into domains.
+
+        AFDB/predicted-structure classifications have only one canonical range, so
+        pdb_range is not required for them.
         """
         if range_type == "author":
-            return None
-        if range_type == "seqid":
             return (
-                "REJECTED: range_type='seqid' -- pyecod_mini could not map seqid->author "
-                "numbering, so this range is not in ECOD's coordinate system and would "
-                "place the domain on the wrong residues."
+                "REJECTED: range_type='author' -- domains.range_definition must be SEQID. "
+                "Author numbering belongs in domain_ranges, not domains."
             )
-        if range_type is None:
-            if getattr(self, "allow_unknown_range_type", False):
-                return None
+        if range_type not in ("seqid", None):
+            return f"REJECTED: unrecognised range_type={range_type!r} (expected 'seqid')."
+        if range_type is None and not getattr(self, "allow_unknown_range_type", False):
             return (
-                "REJECTED: partition XML has no range_type attribute (written before the "
-                "seqid->author fix). Its ranges cannot be assumed to be author-numbered. "
-                "Re-run the partition with a current pyecod_mini, or set "
-                "allow_unknown_range_type=True if this batch is known to be author-numbered."
+                "REJECTED: partition XML has no range_type attribute (written before "
+                "pyecod_mini declared its coordinate system). Re-run the partition with a "
+                "current pyecod_mini, or set allow_unknown_range_type=True for a batch "
+                "known to be seqid-numbered."
             )
-        return f"REJECTED: unrecognised range_type={range_type!r} (expected 'author')."
+        if source_type == "pdb" and not pdb_range:
+            return (
+                "REJECTED: PDB classification carries no pdb_range, so "
+                "ecod_commons.domain_ranges cannot be populated with author numbering. "
+                "Re-run the partition with a pyecod_mini that emits pdb_range (requires "
+                "the chain's mmCIF for the seqid->author map)."
+            )
+        return None
 
     def _get_or_create_protein(
         self,
@@ -621,6 +629,7 @@ class AutoAccessionLoader:
         confidence: Optional[float] = None,
         sequence_length: Optional[int] = None,
         range_type: Optional[str] = None,
+        pdb_range: Optional[str] = None,
         reference_domain_id: Optional[str] = None,
         force: bool = False
     ) -> AccessionResult:
@@ -661,7 +670,7 @@ class AutoAccessionLoader:
         original_domain_id = self._generate_domain_id(pdb_id, chain_id, domain_num)
 
         # HARD GATE: never store a range that is not in ECOD's author numbering.
-        bad_coords = self._check_range_type(range_type)
+        bad_coords = self._check_ranges(range_type, pdb_range)
         if bad_coords:
             return AccessionResult(
                 decision=AccessionDecision.REJECTED_BAD_COORDS,
@@ -822,12 +831,9 @@ class AutoAccessionLoader:
                     domain_version,
                     final_domain_id,
                     range_definition,
-                    # Record the coordinate system actually used. ECOD's vocabulary for
-                    # this column is ('seqid','pdb','uniprot'), where author/PDB residue
-                    # numbering is 'pdb'. pyecod_mini declares "author" for a translated
-                    # range; anything reaching here has passed _check_range_type(), so it
-                    # is author-numbered unless allow_unknown_range_type was set.
-                    'pdb' if range_type == "author" else 'seqid',
+                    # domains.range_definition is SEQID by policy; author numbering goes
+                    # to domain_ranges below. ECOD vocabulary: ('seqid','pdb','uniprot').
+                    'seqid',
                     parsed_range.total_length,
                     parsed_range.is_discontinuous,
                     confidence,
@@ -862,7 +868,7 @@ class AutoAccessionLoader:
                         domain_id, range_definition, range_type, is_primary,
                         source, confidence, created_date, created_by
                     ) VALUES (%s, %s, 'pdb', true, 'pyecod_prod', 1.0, NOW(), 'auto_accession')
-                """, (domain_db_id, range_definition))
+                """, (domain_db_id, pdb_range))
 
                 conn.commit()
 
@@ -957,6 +963,7 @@ class AutoAccessionLoader:
                 confidence=domain.get('confidence'),
                 sequence_length=domain.get('sequence_length'),
                 range_type=domain.get('range_type'),
+                pdb_range=domain.get('pdb_range'),
                 reference_domain_id=domain.get('reference_ecod_domain_id')
             )
 
@@ -1011,6 +1018,7 @@ class AutoAccessionLoader:
                 confidence=data['confidence'],
                 sequence_length=data['sequence_length'],
                 range_type=data.get('range_type'),
+                pdb_range=data.get('pdb_range'),
                 reference_domain_id=data.get('reference_ecod_domain_id')
             )
 

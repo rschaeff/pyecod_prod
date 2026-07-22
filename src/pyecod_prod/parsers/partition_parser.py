@@ -33,6 +33,11 @@ class PartitionDomain:
     #               MUST NOT be accessioned.
     # Older partition XMLs predate the attribute; absence is treated as "unknown".
     range_type: Optional[str] = None
+    # Author (PDB) residue numbering for this domain, destined for
+    # ecod_commons.domain_ranges. A PDB classification must carry both this and the
+    # seqid `range_definition`. Absent for AFDB/predicted sources, which have only one
+    # canonical range, and absent in partition XMLs written before pyecod_mini emitted it.
+    pdb_range: Optional[str] = None
     family: Optional[str] = None  # F-group like "2.1.1"
     t_group: Optional[str] = None
     h_group: Optional[str] = None
@@ -44,10 +49,20 @@ class PartitionDomain:
     source: Optional[str] = None  # "chain_blast_decomposed", etc.
     primary_evidence: Optional[DomainEvidence] = None
 
+    def get_chain_prefixed_pdb_range(self, chain_id: str) -> Optional[str]:
+        """Chain-prefixed AUTHOR (PDB) range for ecod_commons.domain_ranges, or None."""
+        if not self.pdb_range:
+            return None
+        return self._prefix(self.pdb_range, chain_id)
+
     def get_chain_prefixed_range(self, chain_id: str) -> str:
-        """Convert raw range to chain-prefixed format for ecod_commons."""
+        """Chain-prefixed SEQID range for ecod_commons.domains."""
+        return self._prefix(self.range_definition, chain_id)
+
+    @staticmethod
+    def _prefix(raw: str, chain_id: str) -> str:
         # Handle discontinuous ranges (comma-separated)
-        parts = self.range_definition.split(',')
+        parts = raw.split(',')
         prefixed_parts = []
         for part in parts:
             part = part.strip()
@@ -180,6 +195,7 @@ def _parse_domains(root: ET.Element) -> List[PartitionDomain]:
             internal_id=domain_elem.get('id', ''),
             range_definition=domain_elem.get('range', ''),
             range_type=domain_elem.get('range_type'),
+            pdb_range=domain_elem.get('pdb_range'),
             family=domain_elem.get('family'),
             t_group=domain_elem.get('t_group'),
             h_group=domain_elem.get('h_group'),
@@ -305,6 +321,7 @@ def partition_to_domain_data(
         'range_definition': domain.get_chain_prefixed_range(partition.chain_id),
         'raw_range': domain.range_definition,
         'range_type': domain.range_type,
+        'pdb_range': domain.get_chain_prefixed_pdb_range(partition.chain_id),
         'family': domain.family,
         't_group': domain.t_group,
         'h_group': domain.h_group,
