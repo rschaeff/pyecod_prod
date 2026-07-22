@@ -25,6 +25,14 @@ class PartitionDomain:
     """A domain extracted from a partition XML."""
     internal_id: str  # "d1", "d2", etc.
     range_definition: str  # Raw format "1-91"
+    # Coordinate system of range_definition, as declared by pyecod_mini's writer:
+    #   "author" -> ECOD's canonical PDB author residue numbering (safe to accession)
+    #   "seqid"  -> raw 1-based SEQRES index; NOT author numbering. pyecod_mini emits this
+    #               only when it could not build a seqid->author map. Such ranges are
+    #               silently shifted on any chain whose author numbering is offset, and
+    #               MUST NOT be accessioned.
+    # Older partition XMLs predate the attribute; absence is treated as "unknown".
+    range_type: Optional[str] = None
     family: Optional[str] = None  # F-group like "2.1.1"
     t_group: Optional[str] = None
     h_group: Optional[str] = None
@@ -171,6 +179,7 @@ def _parse_domains(root: ET.Element) -> List[PartitionDomain]:
         domain = PartitionDomain(
             internal_id=domain_elem.get('id', ''),
             range_definition=domain_elem.get('range', ''),
+            range_type=domain_elem.get('range_type'),
             family=domain_elem.get('family'),
             t_group=domain_elem.get('t_group'),
             h_group=domain_elem.get('h_group'),
@@ -295,6 +304,7 @@ def partition_to_domain_data(
         'domain_num': domain_num,
         'range_definition': domain.get_chain_prefixed_range(partition.chain_id),
         'raw_range': domain.range_definition,
+        'range_type': domain.range_type,
         'family': domain.family,
         't_group': domain.t_group,
         'h_group': domain.h_group,
