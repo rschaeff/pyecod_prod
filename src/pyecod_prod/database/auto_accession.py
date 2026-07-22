@@ -811,7 +811,7 @@ class AutoAccessionLoader:
                         representative_domain_id,
                         created_by
                     ) VALUES (
-                        %s, %s, %s, %s, %s, 'seqid', %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
                         'classified', 'auto_accession', %s,
                         false, %s, %s
                     )
@@ -822,6 +822,12 @@ class AutoAccessionLoader:
                     domain_version,
                     final_domain_id,
                     range_definition,
+                    # Record the coordinate system actually used. ECOD's vocabulary for
+                    # this column is ('seqid','pdb','uniprot'), where author/PDB residue
+                    # numbering is 'pdb'. pyecod_mini declares "author" for a translated
+                    # range; anything reaching here has passed _check_range_type(), so it
+                    # is author-numbered unless allow_unknown_range_type was set.
+                    'pdb' if range_type == "author" else 'seqid',
                     parsed_range.total_length,
                     parsed_range.is_discontinuous,
                     confidence,
