@@ -39,6 +39,7 @@ Usage:
     results = loader.accession_batch(partition_results, context=context)
 """
 
+from .group_ids import clean_f_group
 import os
 import logging
 import json
@@ -843,6 +844,13 @@ class AutoAccessionLoader:
 
                 domain_db_id = cursor.fetchone()[0]
 
+                # Backstop: never let a non-F-group value reach f_group_id. A
+                # malformed value becomes None here, so the branch below records the
+                # domain as topology-only instead. See database/group_ids.py.
+                f_group = clean_f_group(
+                    f_group, context=f"{pdb_id}_{chain_id} domain {domain_num}", log=logger
+                )
+
                 # Insert T-group assignment if we have T/H/X but no F
                 if t_group and not f_group:
                     cursor.execute("""
@@ -1012,7 +1020,13 @@ class AutoAccessionLoader:
                 t_group=data['t_group'],
                 h_group=data['h_group'],
                 x_group=data['x_group'],
-                f_group=data['family'],  # Family is F-group
+                # NOT data['family'] -- that is a provenance label (T-group / source
+                # accession / reference domain id), and mapping it here is what wrote
+                # 17 T-group ids and 20 protein accessions into f_group_assignments
+                # across 78 domains (repair item 5, v295/HIERARCHY_REPAIR_LIST.md).
+                # None is correct and safe: accession_domain routes a domain with a
+                # t_group but no f_group to t_group_only_assignments instead.
+                f_group=data.get('f_group'),
                 derived_from_uid=None,  # Will look up from reference_ecod_domain_id later
                 context=context,
                 confidence=data['confidence'],

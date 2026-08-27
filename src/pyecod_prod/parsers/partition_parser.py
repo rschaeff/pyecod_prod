@@ -38,7 +38,11 @@ class PartitionDomain:
     # seqid `range_definition`. Absent for AFDB/predicted sources, which have only one
     # canonical range, and absent in partition XMLs written before pyecod_mini emitted it.
     pdb_range: Optional[str] = None
-    family: Optional[str] = None  # F-group like "2.1.1"
+    # Provenance label only -- pyecod_mini fills this with a T-group, a source PDB id
+    # or protein accession, or a reference domain id. NOT an F-group, despite the name.
+    # Mapping it to f_group_id produced repair item 5 (78 bad rows). Use f_group.
+    family: Optional[str] = None
+    f_group: Optional[str] = None  # the real 4th-level F-group; absent = topology-only
     t_group: Optional[str] = None
     h_group: Optional[str] = None
     x_group: Optional[str] = None
@@ -197,6 +201,7 @@ def _parse_domains(root: ET.Element) -> List[PartitionDomain]:
             range_type=domain_elem.get('range_type'),
             pdb_range=domain_elem.get('pdb_range'),
             family=domain_elem.get('family'),
+            f_group=domain_elem.get('f_group'),
             t_group=domain_elem.get('t_group'),
             h_group=domain_elem.get('h_group'),
             x_group=domain_elem.get('x_group'),
@@ -323,6 +328,7 @@ def partition_to_domain_data(
         'range_type': domain.range_type,
         'pdb_range': domain.get_chain_prefixed_pdb_range(partition.chain_id),
         'family': domain.family,
+        'f_group': domain.f_group,
         't_group': domain.t_group,
         'h_group': domain.h_group,
         'x_group': domain.x_group,

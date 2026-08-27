@@ -32,6 +32,7 @@ Usage:
     summary = propagator.propagate_batch(batch_id="ecod_q4_2025_q1_2026")
 """
 
+from .group_ids import clean_f_group
 import logging
 import os
 from dataclasses import dataclass, field
@@ -382,8 +383,18 @@ class ClusterPropagator:
 
                 domain_db_id = cursor.fetchone()[0]
 
+                # Backstop: a representative carrying a malformed f_group_id must not
+                # propagate it to every cluster member. This is how 26 of the 51 bad
+                # rows in repair item 5 arose -- inheritance faithfully copying a bad
+                # value. Falls through to the t_group branch below.
+                rep_f_group = clean_f_group(
+                    rep_domain['f_group'],
+                    context=f"cluster member {member_domain_id} of rep {rep_domain['ecod_uid']}",
+                    log=logger,
+                )
+
                 # Insert F-group assignment
-                if rep_domain['f_group']:
+                if rep_f_group:
                     cursor.execute("""
                         INSERT INTO ecod_commons.f_group_assignments (
                             domain_id, f_group_id, t_group_id, h_group_id, x_group_id,
@@ -392,7 +403,7 @@ class ClusterPropagator:
                         ) VALUES (%s, %s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s)
                     """, (
                         domain_db_id,
-                        rep_domain['f_group'],
+                        rep_f_group,
                         rep_domain['t_group'],
                         rep_domain['h_group'],
                         rep_domain['x_group'],
