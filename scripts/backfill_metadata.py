@@ -20,6 +20,7 @@ Usage:
     python scripts/backfill_metadata.py --start-date 2023-10-27 --end-date 2025-10-10 --dry-run
 """
 
+import os
 import sys
 import argparse
 import logging
@@ -48,14 +49,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_connection_params():
-    """Get database connection parameters (default to dione)"""
-    return {
+    """Get database connection parameters (default to dione).
+
+    Password is resolved by libpq from ~/.pgpass (the previous inline
+    credential was rotated out). PGPASSWORD overrides if set.
+    """
+    params = {
         "host": "dione",
         "port": 45000,
         "database": "ecod_protein",
         "user": "ecod",
-        "password": "ecod#badmin"
     }
+    pw = os.environ.get("PGPASSWORD")
+    if pw:
+        params["password"] = pw
+    return params
 
 
 def find_weekly_releases(
