@@ -12,13 +12,22 @@
 # A null value means "not applicable / use the consumer's built-in default".
 
 # Canonical version used when none is specified.
-default: v294.2
+#
+# Flipped v294.2 -> v295.2 on 2026-08-27, once the v295.2 release was complete end to
+# end: bulk files regenerated, BLAST + foldseek databases built, mini reference CSVs
+# generated, and production synced to match (prod domain count equals domains.txt
+# exactly). v295.2 is the NAR 2027 paper release.
+#
+# v294.2 remains in the registry and is still selectable by name; nothing about it
+# changed. Pin explicitly if you need to reproduce a v294.2-era run.
+default: v295.2
 
 # Aliases → canonical version key (back-compat for the develop291 string).
 aliases:
   develop291: v291
   develop294: v294
   v294_2: v294.2
+  v295_2: v295.2
 
 versions:
   v291:
@@ -59,3 +68,40 @@ versions:
     domain_definitions_csv: /data/ecod/database_versions/v294.2/reference/domain_definitions.csv
     domain_lengths_csv: /data/ecod/database_versions/v294.2/reference/domain_lengths.csv
     protein_lengths_csv: /data/ecod/database_versions/v294.2/reference/protein_lengths.csv
+
+  v295.2:
+    # The NAR 2027 paper release. Bulk files regenerated 2026-08-27 after the
+    # withdrawn-deposition retirement (2,003 domains on 630 entries), the author-range
+    # conversions (113 domains re-extracted) and the empty-node deprecations.
+    summary_suffix: develop291
+    # BLAST DBs built 2026-08-27 (v295.2/blast/build_*.slurm).
+    #   ecod100     2,942,765 domain sequences
+    #   chainwise     886,102 PDB chains -- EXCLUDES the 2,888 chains belonging to the
+    #                 630 withdrawn depositions, so the chain-level search target
+    #                 agrees with the domain-level one. v295 and earlier included them.
+    blast_chain_db: /data/ecod/database_versions/v295.2/blast/chainwise100.v295_2
+    blast_domain_db: /data/ecod/database_versions/v295.2/blast/ecod100.v295_2
+    # HHsearch: DELIBERATELY carried forward from v295 (built 2026-07-23), not rebuilt.
+    # F-group profiles changed marginally between v295 and v295.2: 597 of 32,053 live
+    # F-groups (1.9%) lost at least one member to the retirement and NONE lost all
+    # members, so no profile is invalid -- 1.9% are built over a slightly larger member
+    # set than currently exists. Rebuilding costs days for that.
+    #
+    # Note this is the same shape of decision v294.2 made for chainwise, and there it
+    # was WRONG (+21% drift, corrected in v295). The difference is that this one is
+    # measured: 1.9% membership drift, zero group loss. Re-measure before carrying it
+    # forward again to a later release.
+    hhsearch_db: /data/ecod/database_versions/v295/hhsuite_db/db/ecod_v295_Fgroup
+    domains_txt: /data/ecod/database_versions/v295.2/bulk_files/ecod.v295.2.domains.txt
+    range_cache: null  # not needed; mini reference CSVs are generated below
+    family_lookup: /data/ecod/database_versions/v295.2/domain_family_lookup.tsv
+    classification_lookup: /data/ecod/database_versions/v295.2/domain_classification_lookup.tsv
+    # pyecod_mini reference CSVs, generated 2026-08-27 by
+    # v295/scripts/generate_reference_artifacts.py. Derived from the PUBLISHED
+    # domains.txt, so they describe exactly the rows that shipped -- after
+    # strip_null_tid_from_distributables.py removed repair item 5's 51 malformed rows.
+    # 2,943,252 domains; protein_lengths 886,102 chains (withdrawn entries excluded,
+    # matching the chainwise db).
+    domain_definitions_csv: /data/ecod/database_versions/v295.2/reference/domain_definitions.csv
+    domain_lengths_csv: /data/ecod/database_versions/v295.2/reference/domain_lengths.csv
+    protein_lengths_csv: /data/ecod/database_versions/v295.2/reference/protein_lengths.csv

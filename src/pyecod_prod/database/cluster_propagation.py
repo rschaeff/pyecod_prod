@@ -32,6 +32,8 @@ Usage:
     summary = propagator.propagate_batch(batch_id="ecod_q4_2025_q1_2026")
 """
 
+from .group_ids import clean_f_group
+from .versions import current_development_version_id
 import logging
 import os
 from dataclasses import dataclass, field
@@ -138,11 +140,19 @@ class ClusterPropagator:
         self.tier2_max_length_diff = tier2_max_length_diff
         self.dry_run = dry_run
         self.connection_params = connection_params or DEFAULT_CONNECTION_PARAMS
+        # ecod_commons.versions.id stamped on every inserted row; resolved on first insert
+        self._version_id: Optional[int] = None
 
     def _get_connection(self):
         """Get a database connection."""
         import psycopg2
         return psycopg2.connect(**self.connection_params)
+
+    def _get_version_id(self, conn) -> int:
+        """ecod_commons.versions.id of the current development release (cached)."""
+        if getattr(self, "_version_id", None) is None:
+            self._version_id = current_development_version_id(conn)
+        return self._version_id
 
     def classify_member_tier(
         self,
@@ -317,6 +327,7 @@ class ClusterPropagator:
             )
 
         conn = self._get_connection()
+        version_id = self._get_version_id(conn)
         cursor = conn.cursor()
 
         try:
@@ -343,8 +354,11 @@ class ClusterPropagator:
 
             for i, rep_domain in enumerate(rep_domains, 1):
                 # Generate domain ID for member
-                # Replace the representative's PDB/chain with member's
-                member_domain_id = f"e{member_pdb_id.lower()}{member_chain_id}{i}"
+                # Replace the representative's PDB/chain with member's.
+                # Multi-char chains get a '_' separator before the ordinal to avoid
+                # id collisions (see parsers.generate_ecod_domain_id).
+                _sep = "_" if len(member_chain_id) > 1 else ""
+                member_domain_id = f"e{member_pdb_id.lower()}{member_chain_id}{_sep}{i}"
 
                 # Transform range definition for member chain
                 # Replace rep chain prefix with member chain prefix
@@ -363,8 +377,8 @@ class ClusterPropagator:
                     INSERT INTO ecod_commons.domains (
                         protein_id, domain_id, ecod_uid, range_definition,
                         is_discontinuous, classification_confidence, representative_domain_id,
-                        domain_version, is_obsolete
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false)
+                        domain_version, is_obsolete, version_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false, %s)
                     RETURNING id
                 """, (
                     protein_id,
@@ -374,39 +388,52 @@ class ClusterPropagator:
                     rep_domain['is_discontinuous'],
                     rep_domain['confidence'],
                     rep_domain['id'],  # Link to representative's domain ID (primary key)
-                    f"{domain_version}_propagated"
+                    f"{domain_version}_propagated",
+                    version_id
                 ))
 
                 domain_db_id = cursor.fetchone()[0]
 
+                # Backstop: a representative carrying a malformed f_group_id must not
+                # propagate it to every cluster member. This is how 26 of the 51 bad
+                # rows in repair item 5 arose -- inheritance faithfully copying a bad
+                # value. Falls through to the t_group branch below.
+                rep_f_group = clean_f_group(
+                    rep_domain['f_group'],
+                    context=f"cluster member {member_domain_id} of rep {rep_domain['ecod_uid']}",
+                    log=logger,
+                )
+
                 # Insert F-group assignment
-                if rep_domain['f_group']:
+                if rep_f_group:
                     cursor.execute("""
                         INSERT INTO ecod_commons.f_group_assignments (
                             domain_id, f_group_id, t_group_id, h_group_id, x_group_id,
                             assignment_method, assigned_by,
-                            representative_domain_ecod_uid
-                        ) VALUES (%s, %s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s)
+                            representative_domain_ecod_uid, version_id
+                        ) VALUES (%s, %s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s, %s)
                     """, (
                         domain_db_id,
-                        rep_domain['f_group'],
+                        rep_f_group,
                         rep_domain['t_group'],
                         rep_domain['h_group'],
                         rep_domain['x_group'],
-                        rep_domain['ecod_uid']
+                        rep_domain['ecod_uid'],
+                        version_id
                     ))
                 elif rep_domain['t_group']:
                     # T-group only assignment
                     cursor.execute("""
                         INSERT INTO ecod_commons.t_group_only_assignments (
                             domain_id, t_group_id, h_group_id, x_group_id,
-                            assignment_method, assigned_by
-                        ) VALUES (%s, %s, %s, %s, 'inheritance', 'pyecod_prod')
+                            assignment_method, assigned_by, version_id
+                        ) VALUES (%s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s)
                     """, (
                         domain_db_id,
                         rep_domain['t_group'],
                         rep_domain['h_group'],
-                        rep_domain['x_group']
+                        rep_domain['x_group'],
+                        version_id
                     ))
 
                 # Insert domain_ranges entry (PDB range)

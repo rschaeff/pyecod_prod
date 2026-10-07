@@ -23,6 +23,7 @@ Usage:
     python scripts/load_clustering.py --stats
 """
 
+import os
 import sys
 import re
 import argparse
@@ -56,7 +57,7 @@ def get_connection_params():
         "port": 45000,
         "database": "ecod_protein",
         "user": "ecod",
-        "password": "ecod#badmin"
+        "password": os.environ.get("PGPASSWORD")
     }
 
 

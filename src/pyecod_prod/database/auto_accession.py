@@ -39,6 +39,9 @@ Usage:
     results = loader.accession_batch(partition_results, context=context)
 """
 
+from .group_ids import clean_f_group
+from .versions import current_development_version_id
+import os
 import logging
 import json
 from dataclasses import dataclass, field, asdict
@@ -125,6 +128,13 @@ class AccessionDecision(Enum):
     RENUMBERED = "renumbered"       # Domain ID collision, renumbered
     DEFERRED = "deferred"           # Moderate overlap, needs review
     FAILED = "failed"               # Error during accession
+    # Range is not in ECOD's canonical author (PDB) residue numbering, so storing it
+    # would put a domain on the wrong residues. See _check_range_type().
+    REJECTED_BAD_COORDS = "rejected_bad_coords"
+    # The ECOD reference domain this assignment derives from is not active/classified,
+    # so accessioning would propagate a dead or unclassified reference.
+    # See _check_reference_active().
+    REJECTED_INACTIVE_REFERENCE = "rejected_inactive_reference"
 
 
 @dataclass
@@ -156,6 +166,8 @@ class BatchAccessionSummary:
     renumbered: int = 0
     deferred: int = 0
     failed: int = 0
+    rejected_bad_coords: int = 0
+    rejected_inactive_reference: int = 0
     results: List[AccessionResult] = field(default_factory=list)
 
     def add_result(self, result: AccessionResult):
@@ -176,6 +188,10 @@ class BatchAccessionSummary:
             self.deferred += 1
         elif result.decision == AccessionDecision.FAILED:
             self.failed += 1
+        elif result.decision == AccessionDecision.REJECTED_BAD_COORDS:
+            self.rejected_bad_coords += 1
+        elif result.decision == AccessionDecision.REJECTED_INACTIVE_REFERENCE:
+            self.rejected_inactive_reference += 1
 
     def print_summary(self):
         """Print a summary of the batch accession."""
@@ -190,6 +206,8 @@ class BatchAccessionSummary:
         print(f"  Skipped (exists):   {self.skipped_exists}")
         print(f"  Deferred (review):  {self.deferred}")
         print(f"  Failed:             {self.failed}")
+        print(f"  Rejected (coords):  {self.rejected_bad_coords}")
+        print(f"  Rejected (ref):     {self.rejected_inactive_reference}")
         print(f"{'='*60}\n")
 
 
@@ -213,7 +231,8 @@ class AutoAccessionLoader:
         max_residue_overlap: int = 10,
         max_coverage: float = 0.80,
         defer_moderate_overlaps: bool = True,
-        dry_run: bool = False
+        dry_run: bool = False,
+        allow_unknown_range_type: bool = False
     ):
         """
         Initialize the auto-accession loader.
@@ -225,13 +244,19 @@ class AutoAccessionLoader:
             max_coverage: Maximum allowed bidirectional coverage
             defer_moderate_overlaps: If True, moderate overlaps go to review
             dry_run: If True, don't actually insert, just check
+            allow_unknown_range_type: If True, accept partition XMLs that predate the
+                range_type attribute. Default False: such XMLs cannot be assumed to be
+                author-numbered and are what produced ~124k mis-numbered domains.
         """
+        self.allow_unknown_range_type = allow_unknown_range_type
+        # reference domain_id -> (is_obsolete, classification_status, superseded_by) | 'MISSING'
+        self._reference_status_cache = {}
         self.connection_params = connection_params or {
             "host": "dione",
             "port": 45000,
             "database": "ecod_protein",
             "user": "ecod",
-            "password": "ecod#badmin"
+            "password": os.environ.get("PGPASSWORD")
         }
 
         self.overlap_checker = overlap_checker or DomainOverlapChecker(
@@ -249,6 +274,8 @@ class AutoAccessionLoader:
         self._domain_id_cache: Dict[str, bool] = {}
         # Cache for protein IDs
         self._protein_id_cache: Dict[Tuple[str, str], int] = {}
+        # ecod_commons.versions.id stamped on every inserted row; resolved on first insert
+        self._version_id: Optional[int] = None
         # Set of PDB ID prefixes that have been fully prefetched
         self._prefetched_pdb_prefixes: Set[str] = set()
 
@@ -318,6 +345,12 @@ class AutoAccessionLoader:
         import psycopg2
         return psycopg2.connect(**self.connection_params)
 
+    def _get_version_id(self) -> int:
+        """ecod_commons.versions.id of the current development release (cached)."""
+        if getattr(self, "_version_id", None) is None:
+            self._version_id = current_development_version_id(self._get_connection())
+        return self._version_id
+
     def _get_next_uid(self) -> int:
         """Get the next available ecod_uid from the sequence."""
         conn = self._get_connection()
@@ -384,13 +417,124 @@ class AutoAccessionLoader:
             cursor.close()
             conn.close()
 
+    def _check_reference_active(self, reference_domain_id: Optional[str]) -> Optional[str]:
+        """Return a rejection message if the source reference is not fit to propagate.
+
+        POLICY: never accession a domain whose ECOD reference is not ACTIVE and
+        CLASSIFIED. ECOD reference sets lag the cutting edge, so a reference may be
+        obsolete, superseded, or itself unclassified. Propagating from such a reference
+        re-introduces exactly the stale/incorrect classifications that curation is
+        working to excise.
+
+        Rejects when the reference is:
+          - absent from ecod_commons entirely,
+          - is_obsolete = true,
+          - superseded by another domain,
+          - classification_status != 'classified'.
+
+        A missing reference id is allowed through (the assignment did not claim to derive
+        from a specific ECOD domain); overlap/duplicate checks still apply.
+        """
+        if not reference_domain_id:
+            return None
+
+        cached = self._reference_status_cache.get(reference_domain_id)
+        if cached is None:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """SELECT d.is_obsolete, d.classification_status,
+                              d.superseded_by_domain_id
+                         FROM ecod_commons.domains d
+                        WHERE d.domain_id = %s
+                        LIMIT 1""",
+                    (reference_domain_id,),
+                )
+                row = cur.fetchone()
+            finally:
+                cur.close()
+            cached = row if row else "MISSING"
+            self._reference_status_cache[reference_domain_id] = cached
+
+        if cached == "MISSING":
+            return (f"REJECTED: reference {reference_domain_id!r} is not present in "
+                    f"ecod_commons -- cannot verify it is active.")
+
+        is_obsolete, status, superseded_by = cached
+        reasons = []
+        if is_obsolete:
+            reasons.append("reference is OBSOLETE")
+        if superseded_by is not None:
+            reasons.append("reference is SUPERSEDED")
+        if status != "classified":
+            reasons.append(f"reference classification_status={status!r}")
+        if reasons:
+            return (f"REJECTED: {reference_domain_id} -- " + "; ".join(reasons)
+                    + ". Accessioning would propagate a dead/unclassified reference.")
+        return None
+
+    def _check_ranges(
+        self,
+        range_type: Optional[str],
+        pdb_range: Optional[str],
+        source_type: str = "pdb",
+    ) -> Optional[str]:
+        """Return a rejection message if the ranges are unfit to accession, else None.
+
+        ECOD stores two coordinate systems in two places:
+
+          ecod_commons.domains.range_definition       -> SEQID  (1-based over SEQRES)
+          ecod_commons.domain_ranges.range_definition -> PDB     (author numbering)
+
+        POLICY: a PDB classification must supply BOTH. Supplying one and copying it to
+        both tables is wrong in either direction -- it either mislabels seqid as author
+        in domain_ranges, or writes author numbering into domains.
+
+        AFDB/predicted-structure classifications have only one canonical range, so
+        pdb_range is not required for them.
+        """
+        if range_type == "author":
+            return (
+                "REJECTED: range_type='author' -- domains.range_definition must be SEQID. "
+                "Author numbering belongs in domain_ranges, not domains."
+            )
+        if range_type not in ("seqid", None):
+            return f"REJECTED: unrecognised range_type={range_type!r} (expected 'seqid')."
+        if range_type is None and not getattr(self, "allow_unknown_range_type", False):
+            return (
+                "REJECTED: partition XML has no range_type attribute (written before "
+                "pyecod_mini declared its coordinate system). Re-run the partition with a "
+                "current pyecod_mini, or set allow_unknown_range_type=True for a batch "
+                "known to be seqid-numbered."
+            )
+        if source_type == "pdb" and not pdb_range:
+            return (
+                "REJECTED: PDB classification carries no pdb_range, so "
+                "ecod_commons.domain_ranges cannot be populated with author numbering. "
+                "Re-run the partition with a pyecod_mini that emits pdb_range (requires "
+                "the chain's mmCIF for the seqid->author map)."
+            )
+        return None
+
     def _get_or_create_protein(
         self,
         pdb_id: str,
         chain_id: str,
         sequence_length: Optional[int] = None
     ) -> int:
-        """Get or create a protein record, returning the protein_id."""
+        """Get or create a protein record, returning the protein_id.
+
+        NOTE: `sequence_length` (from partition.metadata.sequence_length) is deliberately
+        NOT written to the protein record. That value is unreliable -- it produced 16,144
+        physically-impossible rows (observed_length > SEQRES), all in the pyecod era, and
+        case-partner chains (e.g. 8zeh 'a' vs 'A') were given identical values despite
+        different true lengths. `ecod_commons.proteins.observed_length` means "polymer
+        residues present in the coordinate model", and its authoritative source is the
+        mmCIF-derived `pdb_analysis.protein.observed_length`. We look it up here; if it is
+        not yet available we insert NULL, because a NULL is honest and a wrong number is not.
+        The parameter is retained only for call-site compatibility.
+        """
         cache_key = (pdb_id.lower(), chain_id)
         if cache_key in self._protein_id_cache:
             return self._protein_id_cache[cache_key]
@@ -408,14 +552,22 @@ class AutoAccessionLoader:
             if row:
                 protein_id = row[0]
             else:
+                # authoritative observed_length (mmCIF-derived); NULL if not yet loaded
+                cursor.execute("""
+                    SELECT observed_length FROM pdb_analysis.protein
+                    WHERE pdb_id = LOWER(%s) AND chain_id = %s AND type = 'protein'
+                """, (pdb_id, chain_id))
+                obs_row = cursor.fetchone()
+                observed_length = obs_row[0] if obs_row else None
+
                 # Create new protein record
                 source_id = f"{pdb_id.lower()}_{chain_id}"
                 cursor.execute("""
                     INSERT INTO ecod_commons.proteins
-                        (source_id, source_type, pdb_id, chain_id, sequence_length)
+                        (source_id, source_type, pdb_id, chain_id, observed_length)
                     VALUES (%s, 'pdb', %s, %s, %s)
                     RETURNING id
-                """, (source_id, pdb_id.lower(), chain_id, sequence_length))
+                """, (source_id, pdb_id.lower(), chain_id, observed_length))
                 protein_id = cursor.fetchone()[0]
                 conn.commit()
 
@@ -486,6 +638,9 @@ class AutoAccessionLoader:
         context: Optional[ProcessingContext] = None,
         confidence: Optional[float] = None,
         sequence_length: Optional[int] = None,
+        range_type: Optional[str] = None,
+        pdb_range: Optional[str] = None,
+        reference_domain_id: Optional[str] = None,
         force: bool = False
     ) -> AccessionResult:
         """
@@ -503,7 +658,13 @@ class AutoAccessionLoader:
             derived_from_uid: UID of the reference domain
             context: ProcessingContext with batch and version tracking
             confidence: Classification confidence score
-            sequence_length: Sequence length for protein record
+            sequence_length: DEPRECATED -- retained for call-site compatibility but NOT
+                written to the protein record. observed_length is sourced from the
+                authoritative mmCIF-derived pdb_analysis.protein.observed_length instead.
+                See _get_or_create_protein() for why.
+            range_type: Coordinate system of range_definition, as declared by pyecod_mini
+                ("author" | "seqid" | None for pre-fix XMLs). Anything other than "author"
+                is REJECTED -- see _check_range_type().
             force: Override overlap checks (like --force_replace)
 
         Returns:
@@ -517,6 +678,30 @@ class AutoAccessionLoader:
                 pyecod_prod_version=get_pyecod_prod_version()
             )
         original_domain_id = self._generate_domain_id(pdb_id, chain_id, domain_num)
+
+        # HARD GATE: never store a range that is not in ECOD's author numbering.
+        bad_coords = self._check_ranges(range_type, pdb_range)
+        if bad_coords:
+            return AccessionResult(
+                decision=AccessionDecision.REJECTED_BAD_COORDS,
+                pdb_id=pdb_id,
+                chain_id=chain_id,
+                original_domain_id=original_domain_id,
+                range_definition=range_definition,
+                message=bad_coords,
+            )
+
+        # HARD GATE: never propagate from a dead or unclassified ECOD reference.
+        inactive_ref = self._check_reference_active(reference_domain_id)
+        if inactive_ref:
+            return AccessionResult(
+                decision=AccessionDecision.REJECTED_INACTIVE_REFERENCE,
+                pdb_id=pdb_id,
+                chain_id=chain_id,
+                original_domain_id=original_domain_id,
+                range_definition=range_definition,
+                message=inactive_ref,
+            )
 
         try:
             # Parse the range to validate
@@ -619,6 +804,7 @@ class AutoAccessionLoader:
 
             # Get next UID
             ecod_uid = self._get_next_uid()
+            version_id = self._get_version_id()
 
             # Insert domain
             conn = self._get_connection()
@@ -643,11 +829,12 @@ class AutoAccessionLoader:
                         classification_confidence,
                         is_representative,
                         representative_domain_id,
-                        created_by
+                        created_by,
+                        version_id
                     ) VALUES (
-                        %s, %s, %s, %s, %s, 'seqid', %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
                         'classified', 'auto_accession', %s,
-                        false, %s, %s
+                        false, %s, %s, %s
                     )
                     RETURNING id
                 """, (
@@ -656,23 +843,34 @@ class AutoAccessionLoader:
                     domain_version,
                     final_domain_id,
                     range_definition,
+                    # domains.range_definition is SEQID by policy; author numbering goes
+                    # to domain_ranges below. ECOD vocabulary: ('seqid','pdb','uniprot').
+                    'seqid',
                     parsed_range.total_length,
                     parsed_range.is_discontinuous,
                     confidence,
                     derived_from_uid,
-                    f'pyecod_prod_{context.pyecod_prod_version or "unknown"}'
+                    f'pyecod_prod_{context.pyecod_prod_version or "unknown"}',
+                    version_id
                 ))
 
                 domain_db_id = cursor.fetchone()[0]
+
+                # Backstop: never let a non-F-group value reach f_group_id. A
+                # malformed value becomes None here, so the branch below records the
+                # domain as topology-only instead. See database/group_ids.py.
+                f_group = clean_f_group(
+                    f_group, context=f"{pdb_id}_{chain_id} domain {domain_num}", log=logger
+                )
 
                 # Insert T-group assignment if we have T/H/X but no F
                 if t_group and not f_group:
                     cursor.execute("""
                         INSERT INTO ecod_commons.t_group_only_assignments (
                             domain_id, t_group_id, h_group_id, x_group_id,
-                            assignment_method, assigned_by
-                        ) VALUES (%s, %s, %s, %s, 'blast', 'pyecod_prod')
-                    """, (domain_db_id, t_group, h_group, x_group))
+                            assignment_method, assigned_by, version_id
+                        ) VALUES (%s, %s, %s, %s, 'blast', 'pyecod_prod', %s)
+                    """, (domain_db_id, t_group, h_group, x_group, version_id))
 
                 # Insert F-group assignment if we have it
                 if f_group:
@@ -680,9 +878,10 @@ class AutoAccessionLoader:
                         INSERT INTO ecod_commons.f_group_assignments (
                             domain_id, f_group_id, t_group_id, h_group_id, x_group_id,
                             assignment_method, assigned_by,
-                            representative_domain_ecod_uid
-                        ) VALUES (%s, %s, %s, %s, %s, 'blast', 'pyecod_prod', %s)
-                    """, (domain_db_id, f_group, t_group, h_group, x_group, derived_from_uid))
+                            representative_domain_ecod_uid, version_id
+                        ) VALUES (%s, %s, %s, %s, %s, 'blast', 'pyecod_prod', %s, %s)
+                    """, (domain_db_id, f_group, t_group, h_group, x_group, derived_from_uid,
+                          version_id))
 
                 # Insert domain_ranges entry (PDB range)
                 cursor.execute("""
@@ -690,7 +889,7 @@ class AutoAccessionLoader:
                         domain_id, range_definition, range_type, is_primary,
                         source, confidence, created_date, created_by
                     ) VALUES (%s, %s, 'pdb', true, 'pyecod_prod', 1.0, NOW(), 'auto_accession')
-                """, (domain_db_id, range_definition))
+                """, (domain_db_id, pdb_range))
 
                 conn.commit()
 
@@ -783,7 +982,10 @@ class AutoAccessionLoader:
                 derived_from_uid=domain.get('derived_from_uid') or domain.get('best_match_ecod_uid'),
                 context=context,
                 confidence=domain.get('confidence'),
-                sequence_length=domain.get('sequence_length')
+                sequence_length=domain.get('sequence_length'),
+                range_type=domain.get('range_type'),
+                pdb_range=domain.get('pdb_range'),
+                reference_domain_id=domain.get('reference_ecod_domain_id')
             )
 
             summary.add_result(result)
@@ -831,11 +1033,20 @@ class AutoAccessionLoader:
                 t_group=data['t_group'],
                 h_group=data['h_group'],
                 x_group=data['x_group'],
-                f_group=data['family'],  # Family is F-group
+                # NOT data['family'] -- that is a provenance label (T-group / source
+                # accession / reference domain id), and mapping it here is what wrote
+                # 17 T-group ids and 20 protein accessions into f_group_assignments
+                # across 78 domains (repair item 5, v295/HIERARCHY_REPAIR_LIST.md).
+                # None is correct and safe: accession_domain routes a domain with a
+                # t_group but no f_group to t_group_only_assignments instead.
+                f_group=data.get('f_group'),
                 derived_from_uid=None,  # Will look up from reference_ecod_domain_id later
                 context=context,
                 confidence=data['confidence'],
-                sequence_length=data['sequence_length']
+                sequence_length=data['sequence_length'],
+                range_type=data.get('range_type'),
+                pdb_range=data.get('pdb_range'),
+                reference_domain_id=data.get('reference_ecod_domain_id')
             )
 
             results.append(result)
