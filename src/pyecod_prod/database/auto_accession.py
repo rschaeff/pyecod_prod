@@ -40,6 +40,7 @@ Usage:
 """
 
 from .group_ids import clean_f_group
+from .versions import current_development_version_id
 import os
 import logging
 import json
@@ -273,6 +274,8 @@ class AutoAccessionLoader:
         self._domain_id_cache: Dict[str, bool] = {}
         # Cache for protein IDs
         self._protein_id_cache: Dict[Tuple[str, str], int] = {}
+        # ecod_commons.versions.id stamped on every inserted row; resolved on first insert
+        self._version_id: Optional[int] = None
         # Set of PDB ID prefixes that have been fully prefetched
         self._prefetched_pdb_prefixes: Set[str] = set()
 
@@ -341,6 +344,12 @@ class AutoAccessionLoader:
         """Get database connection."""
         import psycopg2
         return psycopg2.connect(**self.connection_params)
+
+    def _get_version_id(self) -> int:
+        """ecod_commons.versions.id of the current development release (cached)."""
+        if getattr(self, "_version_id", None) is None:
+            self._version_id = current_development_version_id(self._get_connection())
+        return self._version_id
 
     def _get_next_uid(self) -> int:
         """Get the next available ecod_uid from the sequence."""
@@ -795,6 +804,7 @@ class AutoAccessionLoader:
 
             # Get next UID
             ecod_uid = self._get_next_uid()
+            version_id = self._get_version_id()
 
             # Insert domain
             conn = self._get_connection()
@@ -819,11 +829,12 @@ class AutoAccessionLoader:
                         classification_confidence,
                         is_representative,
                         representative_domain_id,
-                        created_by
+                        created_by,
+                        version_id
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s,
                         'classified', 'auto_accession', %s,
-                        false, %s, %s
+                        false, %s, %s, %s
                     )
                     RETURNING id
                 """, (
@@ -839,7 +850,8 @@ class AutoAccessionLoader:
                     parsed_range.is_discontinuous,
                     confidence,
                     derived_from_uid,
-                    f'pyecod_prod_{context.pyecod_prod_version or "unknown"}'
+                    f'pyecod_prod_{context.pyecod_prod_version or "unknown"}',
+                    version_id
                 ))
 
                 domain_db_id = cursor.fetchone()[0]
@@ -856,9 +868,9 @@ class AutoAccessionLoader:
                     cursor.execute("""
                         INSERT INTO ecod_commons.t_group_only_assignments (
                             domain_id, t_group_id, h_group_id, x_group_id,
-                            assignment_method, assigned_by
-                        ) VALUES (%s, %s, %s, %s, 'blast', 'pyecod_prod')
-                    """, (domain_db_id, t_group, h_group, x_group))
+                            assignment_method, assigned_by, version_id
+                        ) VALUES (%s, %s, %s, %s, 'blast', 'pyecod_prod', %s)
+                    """, (domain_db_id, t_group, h_group, x_group, version_id))
 
                 # Insert F-group assignment if we have it
                 if f_group:
@@ -866,9 +878,10 @@ class AutoAccessionLoader:
                         INSERT INTO ecod_commons.f_group_assignments (
                             domain_id, f_group_id, t_group_id, h_group_id, x_group_id,
                             assignment_method, assigned_by,
-                            representative_domain_ecod_uid
-                        ) VALUES (%s, %s, %s, %s, %s, 'blast', 'pyecod_prod', %s)
-                    """, (domain_db_id, f_group, t_group, h_group, x_group, derived_from_uid))
+                            representative_domain_ecod_uid, version_id
+                        ) VALUES (%s, %s, %s, %s, %s, 'blast', 'pyecod_prod', %s, %s)
+                    """, (domain_db_id, f_group, t_group, h_group, x_group, derived_from_uid,
+                          version_id))
 
                 # Insert domain_ranges entry (PDB range)
                 cursor.execute("""

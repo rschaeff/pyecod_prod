@@ -33,6 +33,7 @@ Usage:
 """
 
 from .group_ids import clean_f_group
+from .versions import current_development_version_id
 import logging
 import os
 from dataclasses import dataclass, field
@@ -139,11 +140,19 @@ class ClusterPropagator:
         self.tier2_max_length_diff = tier2_max_length_diff
         self.dry_run = dry_run
         self.connection_params = connection_params or DEFAULT_CONNECTION_PARAMS
+        # ecod_commons.versions.id stamped on every inserted row; resolved on first insert
+        self._version_id: Optional[int] = None
 
     def _get_connection(self):
         """Get a database connection."""
         import psycopg2
         return psycopg2.connect(**self.connection_params)
+
+    def _get_version_id(self, conn) -> int:
+        """ecod_commons.versions.id of the current development release (cached)."""
+        if getattr(self, "_version_id", None) is None:
+            self._version_id = current_development_version_id(conn)
+        return self._version_id
 
     def classify_member_tier(
         self,
@@ -318,6 +327,7 @@ class ClusterPropagator:
             )
 
         conn = self._get_connection()
+        version_id = self._get_version_id(conn)
         cursor = conn.cursor()
 
         try:
@@ -367,8 +377,8 @@ class ClusterPropagator:
                     INSERT INTO ecod_commons.domains (
                         protein_id, domain_id, ecod_uid, range_definition,
                         is_discontinuous, classification_confidence, representative_domain_id,
-                        domain_version, is_obsolete
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false)
+                        domain_version, is_obsolete, version_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false, %s)
                     RETURNING id
                 """, (
                     protein_id,
@@ -378,7 +388,8 @@ class ClusterPropagator:
                     rep_domain['is_discontinuous'],
                     rep_domain['confidence'],
                     rep_domain['id'],  # Link to representative's domain ID (primary key)
-                    f"{domain_version}_propagated"
+                    f"{domain_version}_propagated",
+                    version_id
                 ))
 
                 domain_db_id = cursor.fetchone()[0]
@@ -399,28 +410,30 @@ class ClusterPropagator:
                         INSERT INTO ecod_commons.f_group_assignments (
                             domain_id, f_group_id, t_group_id, h_group_id, x_group_id,
                             assignment_method, assigned_by,
-                            representative_domain_ecod_uid
-                        ) VALUES (%s, %s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s)
+                            representative_domain_ecod_uid, version_id
+                        ) VALUES (%s, %s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s, %s)
                     """, (
                         domain_db_id,
                         rep_f_group,
                         rep_domain['t_group'],
                         rep_domain['h_group'],
                         rep_domain['x_group'],
-                        rep_domain['ecod_uid']
+                        rep_domain['ecod_uid'],
+                        version_id
                     ))
                 elif rep_domain['t_group']:
                     # T-group only assignment
                     cursor.execute("""
                         INSERT INTO ecod_commons.t_group_only_assignments (
                             domain_id, t_group_id, h_group_id, x_group_id,
-                            assignment_method, assigned_by
-                        ) VALUES (%s, %s, %s, %s, 'inheritance', 'pyecod_prod')
+                            assignment_method, assigned_by, version_id
+                        ) VALUES (%s, %s, %s, %s, 'inheritance', 'pyecod_prod', %s)
                     """, (
                         domain_db_id,
                         rep_domain['t_group'],
                         rep_domain['h_group'],
-                        rep_domain['x_group']
+                        rep_domain['x_group'],
+                        version_id
                     ))
 
                 # Insert domain_ranges entry (PDB range)

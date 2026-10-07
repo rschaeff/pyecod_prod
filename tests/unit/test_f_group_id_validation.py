@@ -93,6 +93,10 @@ class TestValidatorContract:
         assert clean_f_group(value, context="test", log=MagicMock()) is None
 
 
+# Stand-in ecod_commons.versions.id; distinct from any real id so tests can find it.
+TEST_VERSION_ID = 7777
+
+
 class _RecordingCursor:
     """Captures executed SQL so the test can assert which table was written."""
 
@@ -163,6 +167,7 @@ def loader_with_recording_cursor(monkeypatch):
                         lambda *a, **k: (f"e{a[0]}{a[1]}{a[2]}", False), raising=False)
     monkeypatch.setattr(loader, "_get_or_create_protein", lambda *a, **k: 4242, raising=False)
     monkeypatch.setattr(loader, "_get_next_uid", lambda *a, **k: 999999, raising=False)
+    monkeypatch.setattr(loader, "_get_version_id", lambda *a, **k: TEST_VERSION_ID, raising=False)
     return loader, cursor
 
 
@@ -257,6 +262,7 @@ def propagator_with_recording_cursor(monkeypatch):
     prop = cp.ClusterPropagator.__new__(cp.ClusterPropagator)
     prop.dry_run = False
     monkeypatch.setattr(prop, "_get_connection", lambda: conn, raising=False)
+    monkeypatch.setattr(prop, "_get_version_id", lambda *a, **k: TEST_VERSION_ID, raising=False)
     return prop, cursor, cp
 
 
