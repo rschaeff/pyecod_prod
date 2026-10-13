@@ -395,14 +395,18 @@ class AutoAccessionLoader:
             conn.close()
 
     def _get_existing_domain_by_id(self, domain_id: str) -> Optional[Dict]:
-        """Get existing domain info by domain_id."""
+        """Get existing LIVE domain info by domain_id.
+
+        Obsolete domains are ignored: a retired domain with the same id and range must not
+        make a re-partition count as SKIPPED_EXISTS, which would leave nothing live.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("""
                 SELECT id, ecod_uid, range_definition, is_obsolete
                 FROM ecod_commons.domains
-                WHERE domain_id = %s
+                WHERE domain_id = %s AND NOT is_obsolete
             """, (domain_id,))
             row = cursor.fetchone()
             if row:
