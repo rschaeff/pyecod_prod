@@ -6,7 +6,7 @@ Detects computationally designed, de novo, and synthetic proteins that should
 be excluded from ECOD classification (which focuses on naturally evolved proteins).
 
 Detection is based on PDB metadata:
-- Source organism: "synthetic construct"
+- Source organism: "synthetic construct" (medium confidence on its own)
 - Keywords: "DE NOVO PROTEIN"
 - Title patterns: "designed", "de novo", "miniprotein", etc.
 - Design method mentions: Rosetta, RFdiffusion, ProteinMPNN, etc.
@@ -82,6 +82,43 @@ FALSE_POSITIVE_PATTERNS = [
     r'designed\s+for\s+',      # "designed for..." - not a designed protein
 ]
 
+# "synthetic construct" alone stays below the high-confidence threshold (3), so it
+# flags a chain for review but never excludes it without a design signal.
+SYNTHETIC_CONSTRUCT_SCORE = 1
+
+# mmCIF source-organism fields, one per source category
+SOURCE_ORGANISM_FIELDS = [
+    ('_entity_src_gen', 'pdbx_gene_src_scientific_name'),
+    ('_entity_src_nat', 'pdbx_organism_scientific'),
+    ('_pdbx_entity_src_syn', 'organism_scientific'),
+]
+
+# Source organisms that do not tie an entity to a natural protein. Entry-level
+# design language (title, keywords) is attributed only to entities like these.
+UNANCHORED_ORGANISMS = {
+    'synthetic construct',
+    'unidentified',
+    'unknown',
+    'artificial sequence',
+}
+
+
+def _cif_values(cif: Dict, key: str) -> List[str]:
+    """Return an MMCIF2Dict field as a list, with '?' and '.' mapped to ''."""
+    value = cif.get(key, [])
+    if isinstance(value, str):
+        value = [value]
+    return [v.strip() if v not in ('?', '.') else '' for v in value]
+
+
+def _is_unanchored(organisms: List[str]) -> bool:
+    """True if an entity has no natural source organism."""
+    return all(o.lower() in UNANCHORED_ORGANISMS for o in organisms)
+
+
+def _has_synthetic_construct(organisms: List[str]) -> bool:
+    return any(o.lower() == 'synthetic construct' for o in organisms)
+
 
 class DesignedProteinDetector:
     """
@@ -123,10 +160,101 @@ class DesignedProteinDetector:
 
         # Cache for PDB metadata
         self._metadata_cache: Dict[str, Dict[str, str]] = {}
+        self._entry_cache: Dict[str, Dict] = {}
+
+    def _get_mmcif_path(self, pdb_id: str) -> Optional[Path]:
+        """Locate the mmCIF file for a PDB ID, or None if it is not on the mirror."""
+        try:
+            from pyecod_prod.utils.pdb_ids import get_directory_hash
+            dir_hash = get_directory_hash(pdb_id)
+        except (ImportError, ValueError):
+            # Fallback for legacy IDs
+            dir_hash = pdb_id[1:3]
+
+        for name in (f"{pdb_id}.cif.gz", f"{pdb_id}.cif"):
+            path = self.pdb_mirror_path / dir_hash / name
+            if path.exists():
+                return path
+        return None
+
+    def get_entry_info(self, pdb_id: str) -> Dict:
+        """
+        Read entry- and entity-level provenance from the mmCIF file.
+
+        Uses Biopython's MMCIF2Dict so quoted and multi-line values parse
+        correctly. Only polypeptide entities are returned.
+
+        Args:
+            pdb_id: PDB identifier
+
+        Returns:
+            Dict with 'title', 'keywords' and 'entities', where 'entities' maps
+            entity_id -> {'description', 'organisms', 'chains'}. 'chains' are
+            author chain IDs (_entity_poly.pdbx_strand_id), matching the chain
+            IDs Biopython's MMCIFParser assigns.
+        """
+        pdb_id = pdb_id.lower()
+        if pdb_id in self._entry_cache:
+            return self._entry_cache[pdb_id]
+
+        info: Dict = {'title': '', 'keywords': '', 'entities': {}}
+        mmcif_path = self._get_mmcif_path(pdb_id)
+        if mmcif_path is None:
+            self._entry_cache[pdb_id] = info
+            return info
+
+        try:
+            from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+
+            opener = gzip.open if str(mmcif_path).endswith('.gz') else open
+            with opener(mmcif_path, 'rt', errors='replace') as f:
+                cif = MMCIF2Dict(f)
+        except Exception:
+            self._entry_cache[pdb_id] = info
+            return info
+
+        info['title'] = ' '.join(_cif_values(cif, '_struct.title'))
+        info['keywords'] = ' '.join(_cif_values(cif, '_struct_keywords.pdbx_keywords'))
+
+        descriptions = dict(zip(
+            _cif_values(cif, '_entity.id'),
+            _cif_values(cif, '_entity.pdbx_description'),
+        ))
+
+        entities = info['entities']
+        for entity_id, poly_type, strands in zip(
+            _cif_values(cif, '_entity_poly.entity_id'),
+            _cif_values(cif, '_entity_poly.type'),
+            _cif_values(cif, '_entity_poly.pdbx_strand_id'),
+        ):
+            if 'polypeptide' not in poly_type.lower():
+                continue
+            entities[entity_id] = {
+                'description': descriptions.get(entity_id, ''),
+                'organisms': [],
+                'chains': [c.strip() for c in strands.split(',') if c.strip()],
+            }
+
+        # An entity can have several source rows (chimeras, fusions).
+        for category, field_name in SOURCE_ORGANISM_FIELDS:
+            for entity_id, organism in zip(
+                _cif_values(cif, f'{category}.entity_id'),
+                _cif_values(cif, f'{category}.{field_name}'),
+            ):
+                if entity_id in entities and organism:
+                    entities[entity_id]['organisms'].append(organism)
+
+        self._entry_cache[pdb_id] = info
+        return info
 
     def get_pdb_metadata(self, pdb_id: str) -> Dict[str, str]:
         """
-        Extract relevant metadata from mmCIF file.
+        Extract entry-level metadata from mmCIF file.
+
+        'source_organism' is 'synthetic construct' only when every polypeptide
+        entity is unanchored (no natural source organism) and at least one is
+        a synthetic construct. A synthetic DNA strand, peptide ligand or tag on
+        one entity no longer marks the whole entry.
 
         Args:
             pdb_id: PDB identifier
@@ -140,77 +268,25 @@ class DesignedProteinDetector:
         if pdb_id in self._metadata_cache:
             return self._metadata_cache[pdb_id]
 
+        info = self.get_entry_info(pdb_id)
+        entities = list(info['entities'].values())
+
+        source_organism = ''
+        if entities and all(_is_unanchored(e['organisms']) for e in entities):
+            if any(_has_synthetic_construct(e['organisms']) for e in entities):
+                source_organism = 'synthetic construct'
+        else:
+            for entity in entities:
+                natural = [o for o in entity['organisms'] if o.lower() not in UNANCHORED_ORGANISMS]
+                if natural:
+                    source_organism = natural[0]
+                    break
+
         metadata = {
-            'title': '',
-            'keywords': '',
-            'source_organism': '',
+            'title': info['title'],
+            'keywords': info['keywords'],
+            'source_organism': source_organism,
         }
-
-        # Find mmCIF file
-        try:
-            from pyecod_prod.utils.pdb_ids import get_directory_hash
-            dir_hash = get_directory_hash(pdb_id)
-        except (ImportError, ValueError):
-            # Fallback for legacy IDs
-            dir_hash = pdb_id[1:3]
-
-        mmcif_path = self.pdb_mirror_path / dir_hash / f"{pdb_id}.cif.gz"
-        if not mmcif_path.exists():
-            mmcif_path = self.pdb_mirror_path / dir_hash / f"{pdb_id}.cif"
-
-        if not mmcif_path.exists():
-            self._metadata_cache[pdb_id] = metadata
-            return metadata
-
-        try:
-            opener = gzip.open if str(mmcif_path).endswith('.gz') else open
-            with opener(mmcif_path, 'rt', errors='replace') as f:
-                in_title = False
-                title_lines = []
-
-                for line in f:
-                    # Title (can be multi-line)
-                    if line.startswith('_struct.title'):
-                        if "'" in line:
-                            metadata['title'] = line.split("'")[1]
-                        elif ';' in line:
-                            in_title = True
-                        else:
-                            parts = line.strip().split(None, 1)
-                            if len(parts) > 1:
-                                metadata['title'] = parts[1]
-                    elif in_title:
-                        if line.startswith(';'):
-                            metadata['title'] = ' '.join(title_lines)
-                            in_title = False
-                        else:
-                            title_lines.append(line.strip())
-
-                    # Keywords
-                    elif line.startswith('_struct_keywords.pdbx_keywords'):
-                        parts = line.strip().split(None, 1)
-                        if len(parts) > 1:
-                            metadata['keywords'] = parts[1].strip("'\"")
-
-                    # Source organism (check multiple fields)
-                    elif line.startswith('_entity_src_gen.pdbx_gene_src_scientific_name'):
-                        parts = line.strip().split(None, 1)
-                        if len(parts) > 1 and parts[1] not in ['?', '.']:
-                            org = parts[1].strip("'\"")
-                            if org and not metadata['source_organism']:
-                                metadata['source_organism'] = org
-
-                    # Also check for "synthetic construct" anywhere
-                    if 'synthetic construct' in line.lower():
-                        metadata['source_organism'] = 'synthetic construct'
-
-                    # Stop early if we have everything
-                    if all(metadata.values()):
-                        break
-
-        except Exception:
-            pass
-
         self._metadata_cache[pdb_id] = metadata
         return metadata
 
@@ -238,17 +314,17 @@ class DesignedProteinDetector:
         score = 0
         reasons = []
 
-        # Check for false positive patterns first
-        combined_text = f"{title} {keywords}".lower()
+        # Remove false-positive phrases ("designed for bacterial expression",
+        # "synthetic biology") so they cannot match the title patterns below
+        match_title = title
         for fp_pattern in self._false_positive_patterns:
-            if fp_pattern.search(combined_text):
-                # Reduce confidence if false positive pattern found
-                # Don't return immediately - still check other markers
-                pass
+            match_title = fp_pattern.sub(' ', match_title)
 
-        # Check source organism (high confidence)
+        # Check source organism. Alone this is medium confidence: depositors
+        # label engineered variants of natural proteins (antibody fragments,
+        # ancestral reconstructions, stabilised mutants) "synthetic construct".
         if 'synthetic construct' in source_organism.lower():
-            score += 3
+            score += SYNTHETIC_CONSTRUCT_SCORE
             reasons.append('synthetic_construct_organism')
 
         # Check keywords
@@ -260,7 +336,7 @@ class DesignedProteinDetector:
 
         # Check title patterns
         for pattern, (name, pattern_score) in self._title_patterns.items():
-            if pattern.search(title):
+            if pattern.search(match_title):
                 score += pattern_score
                 reasons.append(name)
 
@@ -284,6 +360,49 @@ class DesignedProteinDetector:
             keywords=keywords,
             source_organism=source_organism,
         )
+
+    def detect_chains(self, pdb_id: str) -> Dict[str, DesignedProteinResult]:
+        """
+        Detect designed proteins per author chain.
+
+        Each chain is scored from its own entity: the entity description and
+        source organism. Entry-level signals (title, DE NOVO PROTEIN keyword)
+        are attributed only to entities with no natural source organism, so a
+        natural binding partner in a design paper is not marked designed.
+
+        Args:
+            pdb_id: PDB identifier
+
+        Returns:
+            Dict mapping author chain ID -> DesignedProteinResult. Empty if the
+            mmCIF file is missing or unreadable.
+        """
+        pdb_id = pdb_id.lower()
+        info = self.get_entry_info(pdb_id)
+
+        results = {}
+        for entity in info['entities'].values():
+            unanchored = _is_unanchored(entity['organisms'])
+            text = entity['description']
+            if unanchored:
+                text = f"{text} {info['title']}"
+            metadata = {
+                'title': text,
+                'keywords': info['keywords'] if unanchored else '',
+                # A fusion's tag or linker row must not mark its natural partner
+                'source_organism': (
+                    'synthetic construct'
+                    if unanchored and _has_synthetic_construct(entity['organisms'])
+                    else '; '.join(
+                        o for o in entity['organisms']
+                        if o.lower() not in UNANCHORED_ORGANISMS
+                    )
+                ),
+            }
+            result = self.detect(pdb_id, metadata=metadata)
+            for chain_id in entity['chains']:
+                results[chain_id] = result
+        return results
 
     def detect_batch(self, pdb_ids: List[str]) -> Dict[str, DesignedProteinResult]:
         """
