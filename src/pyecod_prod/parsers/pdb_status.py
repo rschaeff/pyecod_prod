@@ -104,9 +104,12 @@ class PDBStatusParser:
             )
             # Cache for designed protein results per PDB
             self._designed_cache: Dict[str, DesignedProteinConfidence] = {}
+            # Per-chain results: pdb_id -> {author chain ID -> confidence}
+            self._designed_chain_cache: Dict[str, Dict[str, DesignedProteinConfidence]] = {}
         else:
             self.designed_detector = None
             self._designed_cache = {}
+            self._designed_chain_cache = {}
 
     def get_weekly_additions(self, status_dir: str) -> List[str]:
         """
@@ -237,7 +240,9 @@ class PDBStatusParser:
                 sequence_length = len(sequence_str)
 
                 # Determine if classifiable
-                can_classify, reason = self._is_classifiable(sequence_str, sequence_length, pdb_id)
+                can_classify, reason = self._is_classifiable(
+                    sequence_str, sequence_length, pdb_id, chain_id
+                )
 
                 chain_info = ChainInfo(
                     pdb_id=pdb_id.lower(),
@@ -252,12 +257,20 @@ class PDBStatusParser:
 
         return chains
 
-    def _check_designed_protein(self, pdb_id: str) -> DesignedProteinConfidence:
+    def _check_designed_protein(
+        self,
+        pdb_id: str,
+        chain_id: Optional[str] = None,
+    ) -> DesignedProteinConfidence:
         """
-        Check if a PDB entry is a designed protein.
+        Check if a chain (or, without chain_id, a whole entry) is a designed protein.
+
+        With chain_id the chain is judged on its own entity, so a synthetic DNA
+        strand or peptide ligand elsewhere in the entry does not exclude it.
 
         Args:
             pdb_id: PDB identifier
+            chain_id: Author chain ID
 
         Returns:
             DesignedProteinConfidence level
@@ -266,6 +279,16 @@ class PDBStatusParser:
             return DesignedProteinConfidence.NONE
 
         pdb_id = pdb_id.lower()
+
+        if chain_id is not None:
+            if pdb_id not in self._designed_chain_cache:
+                self._designed_chain_cache[pdb_id] = {
+                    chain: result.confidence
+                    for chain, result in self.designed_detector.detect_chains(pdb_id).items()
+                }
+            return self._designed_chain_cache[pdb_id].get(
+                chain_id, DesignedProteinConfidence.NONE
+            )
 
         # Check cache
         if pdb_id in self._designed_cache:
@@ -282,6 +305,7 @@ class PDBStatusParser:
         sequence: str,
         length: int,
         pdb_id: Optional[str] = None,
+        chain_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Determine if a chain can be classified.
@@ -290,6 +314,7 @@ class PDBStatusParser:
             sequence: Amino acid sequence
             length: Sequence length
             pdb_id: PDB identifier (for designed protein check)
+            chain_id: Author chain ID (for per-chain designed protein check)
 
         Returns:
             (can_classify, reason) - reason is None if classifiable
@@ -300,7 +325,7 @@ class PDBStatusParser:
 
         # Check for designed proteins (if enabled and pdb_id provided)
         if pdb_id and self.filter_designed_proteins:
-            confidence = self._check_designed_protein(pdb_id)
+            confidence = self._check_designed_protein(pdb_id, chain_id)
 
             # Filter based on confidence level setting
             if self.designed_protein_confidence == "high":
