@@ -6,7 +6,7 @@ Detects computationally designed, de novo, and synthetic proteins that should
 be excluded from ECOD classification (which focuses on naturally evolved proteins).
 
 Detection is based on PDB metadata:
-- Source organism: "synthetic construct"
+- Source organism: "synthetic construct" (medium confidence on its own)
 - Keywords: "DE NOVO PROTEIN"
 - Title patterns: "designed", "de novo", "miniprotein", etc.
 - Design method mentions: Rosetta, RFdiffusion, ProteinMPNN, etc.
@@ -81,6 +81,10 @@ FALSE_POSITIVE_PATTERNS = [
     r'designed\s+to\s+',       # "designed to study..." - not a designed protein
     r'designed\s+for\s+',      # "designed for..." - not a designed protein
 ]
+
+# "synthetic construct" alone stays below the high-confidence threshold (3), so it
+# flags a chain for review but never excludes it without a design signal.
+SYNTHETIC_CONSTRUCT_SCORE = 1
 
 # mmCIF source-organism fields, one per source category
 SOURCE_ORGANISM_FIELDS = [
@@ -316,9 +320,11 @@ class DesignedProteinDetector:
         for fp_pattern in self._false_positive_patterns:
             match_title = fp_pattern.sub(' ', match_title)
 
-        # Check source organism (high confidence)
+        # Check source organism. Alone this is medium confidence: depositors
+        # label engineered variants of natural proteins (antibody fragments,
+        # ancestral reconstructions, stabilised mutants) "synthetic construct".
         if 'synthetic construct' in source_organism.lower():
-            score += 3
+            score += SYNTHETIC_CONSTRUCT_SCORE
             reasons.append('synthetic_construct_organism')
 
         # Check keywords

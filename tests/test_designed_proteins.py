@@ -19,7 +19,7 @@ class TestDesignedProteinDetector:
     """Tests for DesignedProteinDetector class."""
 
     def test_detect_synthetic_construct_organism(self):
-        """Synthetic construct organism should be high confidence."""
+        """Synthetic construct organism alone is medium confidence, not excluded."""
         detector = DesignedProteinDetector()
 
         # Mock the metadata
@@ -32,9 +32,9 @@ class TestDesignedProteinDetector:
         result = detector.detect('test', metadata=metadata)
 
         assert result.is_designed is True
-        assert result.confidence == DesignedProteinConfidence.HIGH
+        assert result.confidence == DesignedProteinConfidence.MEDIUM
+        assert result.should_exclude is False
         assert 'synthetic_construct_organism' in result.reasons
-        assert result.score >= 3
 
     def test_detect_de_novo_keyword(self):
         """DE NOVO PROTEIN keyword should be high confidence."""
@@ -148,7 +148,7 @@ class TestDesignedProteinDetector:
         assert result.confidence == DesignedProteinConfidence.HIGH
         # Should have multiple reasons
         assert len(result.reasons) >= 3
-        assert result.score >= 7  # 3 (synthetic) + 3 (keyword) + 2 (de novo title)
+        assert result.score >= 6  # 1 (synthetic) + 3 (keyword) + 2 (de novo title)
 
     def test_filter_designed(self):
         """filter_designed should separate designed from natural."""

@@ -130,6 +130,7 @@ class TestPerChainAttribution:
         chains = detector.detect_chains('1abc')
         assert chains['R'].confidence == DesignedProteinConfidence.NONE
         assert 'synthetic_construct_organism' in chains['L'].reasons
+        assert chains['L'].confidence == DesignedProteinConfidence.MEDIUM
 
     def test_design_title_not_attributed_to_natural_partner(self, mirror):
         """A de novo binder bound to a natural target: only the binder is designed."""
@@ -232,6 +233,13 @@ class TestRealEntries:
         chains = DesignedProteinDetector().detect_chains('20zc')
         assert not chains['R'].should_exclude
         assert not chains['A'].should_exclude
+
+    def test_engineered_natural_variants_kept(self):
+        """Labelled "synthetic construct" but natural families ECOD can classify."""
+        detector = DesignedProteinDetector()
+        # hSA3 albumin variant; ancestral dehalogenase-luciferase
+        assert not detector.detect_chains('9r8p')['A'].should_exclude
+        assert not detector.detect_chains('9rbn')['A'].should_exclude
 
     def test_9hnh_still_designed(self):
         """Synthetic alpha solenoid: a genuine design stays excluded."""
