@@ -249,7 +249,8 @@ class AutoAccessionLoader:
                 author-numbered and are what produced ~124k mis-numbered domains.
         """
         self.allow_unknown_range_type = allow_unknown_range_type
-        # reference domain_id -> (is_obsolete, classification_status, superseded_by) | 'MISSING'
+        # reference domain_id -> (is_obsolete, classification_status, superseded_by,
+        #                         has_assignment) | 'MISSING'
         self._reference_status_cache = {}
         self.connection_params = connection_params or {
             "host": "dione",
@@ -434,7 +435,12 @@ class AutoAccessionLoader:
           - absent from ecod_commons entirely,
           - is_obsolete = true,
           - superseded by another domain,
-          - classification_status != 'classified'.
+          - not classified: classification_status != 'classified' AND no
+            f_group_assignments / t_group_only_assignments row.
+
+        classification_status alone is not authoritative: it is 'unclassified' for every
+        archaea_dpam_v294 domain and almost every *_propagated domain, which the published
+        releases (v295.2) carry fully classified through their hierarchy assignments.
 
         A missing reference id is allowed through (the assignment did not claim to derive
         from a specific ECOD domain); overlap/duplicate checks still apply.
@@ -449,7 +455,11 @@ class AutoAccessionLoader:
             try:
                 cur.execute(
                     """SELECT d.is_obsolete, d.classification_status,
-                              d.superseded_by_domain_id
+                              d.superseded_by_domain_id,
+                              EXISTS (SELECT 1 FROM ecod_commons.f_group_assignments fa
+                                       WHERE fa.domain_id = d.id)
+                              OR EXISTS (SELECT 1 FROM ecod_commons.t_group_only_assignments t
+                                          WHERE t.domain_id = d.id)
                          FROM ecod_commons.domains d
                         WHERE d.domain_id = %s
                         LIMIT 1""",
@@ -465,14 +475,15 @@ class AutoAccessionLoader:
             return (f"REJECTED: reference {reference_domain_id!r} is not present in "
                     f"ecod_commons -- cannot verify it is active.")
 
-        is_obsolete, status, superseded_by = cached
+        is_obsolete, status, superseded_by, has_assignment = cached
         reasons = []
         if is_obsolete:
             reasons.append("reference is OBSOLETE")
         if superseded_by is not None:
             reasons.append("reference is SUPERSEDED")
-        if status != "classified":
-            reasons.append(f"reference classification_status={status!r}")
+        if status != "classified" and not has_assignment:
+            reasons.append(f"reference classification_status={status!r} "
+                           f"and no hierarchy assignment")
         if reasons:
             return (f"REJECTED: {reference_domain_id} -- " + "; ".join(reasons)
                     + ". Accessioning would propagate a dead/unclassified reference.")
