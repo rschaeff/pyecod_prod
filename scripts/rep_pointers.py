@@ -11,7 +11,9 @@ Policy: a non-rep domain's rep must be in its own F-group (database/rep_pointers
          curation). Dry run unless --commit.
 
 X.H.T.0 domains (policy unresolved) and non-F-group values such as EPP accessions are
-counted, never failed or changed.
+counted, never failed or changed. A domain flagged is_representative only in ecod_commons
+(no ecod_rep flag) fails check as commons_only_rep and is skipped by reset: decide whether it
+is a rep first.
 
 Usage:
     python scripts/rep_pointers.py check --uid-range 5347772-5352817
@@ -64,8 +66,8 @@ def main():
         if args.action == "check":
             counts, fails = check_rep_pointers(conn, **select)
             for k, v in counts.items():
-                flag = "   FAIL" if v and k in ("no_pointer", "cross_f", "cross_h") else ""
-                logger.info(f"  {k:<11}{v:>9,}{flag}")
+                flag = "   FAIL" if v and k in ("no_pointer", "cross_f", "cross_h", "commons_only_rep") else ""
+                logger.info(f"  {k:<17}{v:>9,}{flag}")
             if args.list:
                 with open(args.list, "w") as out:
                     out.write("domain_pk\tdomain_id\tf_group\tpointer\tissue\n")

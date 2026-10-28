@@ -108,14 +108,24 @@ class FGroupRepResolver:
         return chosen
 
 
-# Non-rep, non-obsolete domains with their F-group and current pointer (+ the pointer's F-group)
+# Non-rep, non-obsolete domains with their F-group and current pointer (+ the pointer's F-group).
+# "Rep" means flagged in ecod_rep (manual_rep / provisional_manual_rep), the same test the resolver
+# uses. Not merely having an ecod_rep.domain row: a demoted or replaced rep keeps its row with the
+# flag cleared and is an ordinary member (978 such domains, 424 with a NULL or out-of-F pointer, were
+# invisible to the check). Not ecod_commons.domains.is_representative either: it disagrees with
+# ecod_rep both ways (1,271 set without an ecod_rep flag, 3,575 flagged reps without it; 2026-10-28).
+# It is still selected: the version_consistency constraint refuses a pointer on a domain with
+# is_representative set, so such a domain (a rep only in ecod_commons) cannot be reset until someone
+# decides whether it is a rep. check fails it as commons_only_rep; reset skips it.
 _TARGET_SQL = """
-    SELECT m.id, m.domain_id, fa.f_group_id, m.representative_domain_id, rfa.f_group_id
+    SELECT m.id, m.domain_id, fa.f_group_id, m.representative_domain_id, rfa.f_group_id,
+           m.is_representative
       FROM ecod_commons.domains m
       JOIN ecod_commons.f_group_assignments fa ON fa.domain_id = m.id
       LEFT JOIN ecod_commons.f_group_assignments rfa ON rfa.domain_id = m.representative_domain_id
-     WHERE NOT m.is_obsolete AND NOT m.is_representative
-       AND NOT EXISTS (SELECT 1 FROM ecod_rep.domain x WHERE x.ecod_uid = m.ecod_uid)
+     WHERE NOT m.is_obsolete
+       AND NOT EXISTS (SELECT 1 FROM ecod_rep.domain x WHERE x.ecod_uid = m.ecod_uid
+                         AND (x.manual_rep OR x.provisional_manual_rep))
        AND {where}
 """
 
@@ -143,7 +153,8 @@ def classify(f_group: str, pointer: Optional[int], pointer_f: Optional[str]) -> 
     """ok / no_pointer / cross_f / cross_h for a domain in a real F-group.
 
     dot0 for X.H.T.0, not_f_group for a value that is not an F-group id (e.g. an EPP
-    accession written by resolve_fgroups); both are reported, not failed.
+    accession written by resolve_fgroups); both are reported, not failed. A failing domain
+    flagged is_representative in ecod_commons only is reported as commons_only_rep by the callers.
     """
     if not is_f_group(f_group):
         return "not_f_group"
@@ -170,12 +181,15 @@ def check_rep_pointers(conn, **select) -> Tuple[Dict[str, int], List[tuple]]:
         rows = cur.fetchall()
     finally:
         cur.close()
-    counts = {k: 0 for k in ("ok", "no_pointer", "cross_f", "cross_h", "dot0", "not_f_group")}
+    counts = {k: 0 for k in ("ok", "no_pointer", "cross_f", "cross_h", "commons_only_rep",
+                             "dot0", "not_f_group")}
     fails = []
-    for dom_pk, dom, f, ptr, ptr_f in rows:
+    for dom_pk, dom, f, ptr, ptr_f, commons_rep in rows:
         k = classify(f, ptr, ptr_f)
+        if k in ("no_pointer", "cross_f", "cross_h") and commons_rep:
+            k = "commons_only_rep"     # needs a decision (rep or member), not a reset
         counts[k] += 1
-        if k in ("no_pointer", "cross_f", "cross_h"):
+        if k in ("no_pointer", "cross_f", "cross_h", "commons_only_rep"):
             fails.append((dom_pk, dom, f, ptr, k))
     return counts, fails
 
@@ -187,18 +201,23 @@ def reset_rep_pointers(conn, resolver: FGroupRepResolver, *, dry_run: bool = Tru
     For any step that changes ``f_group_assignments.f_group_id`` after accession
     (resolve_fgroups, Pfam passes, curation). A pointer already in the domain's own
     F-group is kept (it meets the policy; e.g. a propagated member pointing at its cluster
-    rep), so only NULL and out-of-F-group pointers change. Commits unless ``dry_run``.
+    rep), so only NULL and out-of-F-group pointers change. A domain flagged
+    is_representative in ecod_commons only is skipped and counted as commons_only_rep: the
+    version_consistency constraint refuses it a pointer. Commits unless ``dry_run``.
     """
     where, params = _where(**select)
     cur = conn.cursor()
-    counts = {"kept": 0, "set": 0, "no_rep": 0, "dot0": 0, "not_f_group": 0}
+    counts = {"kept": 0, "set": 0, "no_rep": 0, "commons_only_rep": 0, "dot0": 0, "not_f_group": 0}
     updates = []
     try:
         cur.execute(_TARGET_SQL.format(where=where), params)
-        for dom_pk, _dom, f, ptr, ptr_f in cur.fetchall():
+        for dom_pk, _dom, f, ptr, ptr_f, commons_rep in cur.fetchall():
             k = classify(f, ptr, ptr_f)
             if k in ("dot0", "not_f_group", "ok"):
                 counts["kept" if k == "ok" else k] += 1
+                continue
+            if commons_rep:
+                counts["commons_only_rep"] += 1
                 continue
             new = resolver.rep_for(f)
             if new is None:

@@ -114,15 +114,27 @@ class _ResetCursor:
         pass
 
 
+class TestTargetSelection:
+    """Who counts as a rep (and so is skipped) -- regression for former reps going unchecked."""
+
+    def test_skips_only_reps_flagged_in_ecod_rep(self):
+        from pyecod_prod.database.rep_pointers import _TARGET_SQL
+        sql = " ".join(_TARGET_SQL.split())
+        assert "x.manual_rep OR x.provisional_manual_rep" in sql
+        where = sql.split(" WHERE ", 1)[1]
+        assert "is_representative" not in where     # selected for reporting, never a filter
+
+
 class TestReset:
-    # (domain pk, domain_id, f_group, pointer, pointer's f_group)
+    # (domain pk, domain_id, f_group, pointer, pointer's f_group, ecod_commons is_representative)
     ROWS = [
-        (1, "a", "2004.1.1.1", None, None),           # NULL          -> set
-        (2, "b", "2004.1.1.1", 900, "2004.1.1.7"),    # other F       -> set
-        (3, "c", "2004.1.1.1", 901, "2004.1.1.1"),    # same F        -> kept
-        (4, "d", "2004.1.1.0", None, None),           # .0            -> untouched
-        (5, "e", "EPP00022109", None, None),          # not F         -> untouched
-        (6, "f", "2004.1.1.9", None, None),           # F has no rep  -> no_rep
+        (1, "a", "2004.1.1.1", None, None, False),           # NULL          -> set
+        (2, "b", "2004.1.1.1", 900, "2004.1.1.7", False),    # other F       -> set
+        (3, "c", "2004.1.1.1", 901, "2004.1.1.1", False),    # same F        -> kept
+        (4, "d", "2004.1.1.0", None, None, False),           # .0            -> untouched
+        (5, "e", "EPP00022109", None, None, False),          # not F         -> untouched
+        (6, "f", "2004.1.1.9", None, None, False),           # F has no rep  -> no_rep
+        (7, "g", "2004.1.1.1", None, None, True),            # commons-only rep -> skipped
     ]
 
     def _run(self, dry_run):
@@ -135,7 +147,8 @@ class TestReset:
 
     def test_only_null_and_out_of_f_pointers_change(self):
         counts, cur, conn = self._run(dry_run=False)
-        assert counts == {"kept": 1, "set": 2, "no_rep": 1, "dot0": 1, "not_f_group": 1}
+        assert counts == {"kept": 1, "set": 2, "no_rep": 1, "commons_only_rep": 1, "dot0": 1,
+                          "not_f_group": 1}
         assert cur.updates == [(11, 1), (11, 2)]
         conn.commit.assert_called_once()
 
@@ -143,6 +156,15 @@ class TestReset:
         counts, cur, conn = self._run(dry_run=True)
         assert counts["set"] == 2 and cur.updates is None
         conn.commit.assert_not_called()
+
+    def test_check_labels_commons_only_rep(self):
+        from pyecod_prod.database.rep_pointers import check_rep_pointers
+        cur = _ResetCursor(list(self.ROWS))
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        counts, fails = check_rep_pointers(conn, domain_ids=[1])
+        assert counts["commons_only_rep"] == 1 and counts["no_pointer"] == 2
+        assert [f[4] for f in fails if f[0] == 7] == ["commons_only_rep"]
 
     def test_selection_required(self):
         with pytest.raises(ValueError):
