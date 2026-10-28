@@ -114,6 +114,16 @@ class _ResetCursor:
         pass
 
 
+class TestTargetSelection:
+    """Who counts as a rep (and so is skipped) -- regression for former reps going unchecked."""
+
+    def test_skips_only_reps_flagged_in_ecod_rep(self):
+        from pyecod_prod.database.rep_pointers import _TARGET_SQL
+        sql = " ".join(_TARGET_SQL.split())
+        assert "x.manual_rep OR x.provisional_manual_rep" in sql
+        assert "is_representative" not in sql
+
+
 class TestReset:
     # (domain pk, domain_id, f_group, pointer, pointer's f_group)
     ROWS = [

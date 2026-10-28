@@ -108,14 +108,20 @@ class FGroupRepResolver:
         return chosen
 
 
-# Non-rep, non-obsolete domains with their F-group and current pointer (+ the pointer's F-group)
+# Non-rep, non-obsolete domains with their F-group and current pointer (+ the pointer's F-group).
+# "Rep" means flagged in ecod_rep (manual_rep / provisional_manual_rep), the same test the resolver
+# uses. Not merely having an ecod_rep.domain row: a demoted or replaced rep keeps its row with the
+# flag cleared and is an ordinary member (978 such domains, 424 with a NULL or out-of-F pointer, were
+# invisible to the check). Not ecod_commons.domains.is_representative either: it disagrees with
+# ecod_rep both ways (1,271 set without an ecod_rep flag, 3,575 flagged reps without it; 2026-10-28).
 _TARGET_SQL = """
     SELECT m.id, m.domain_id, fa.f_group_id, m.representative_domain_id, rfa.f_group_id
       FROM ecod_commons.domains m
       JOIN ecod_commons.f_group_assignments fa ON fa.domain_id = m.id
       LEFT JOIN ecod_commons.f_group_assignments rfa ON rfa.domain_id = m.representative_domain_id
-     WHERE NOT m.is_obsolete AND NOT m.is_representative
-       AND NOT EXISTS (SELECT 1 FROM ecod_rep.domain x WHERE x.ecod_uid = m.ecod_uid)
+     WHERE NOT m.is_obsolete
+       AND NOT EXISTS (SELECT 1 FROM ecod_rep.domain x WHERE x.ecod_uid = m.ecod_uid
+                         AND (x.manual_rep OR x.provisional_manual_rep))
        AND {where}
 """
 
