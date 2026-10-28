@@ -40,6 +40,7 @@ Usage:
 """
 
 from .group_ids import clean_f_group
+from .rep_pointers import FGroupRepResolver
 from .versions import current_development_version_id
 import os
 import logging
@@ -252,6 +253,8 @@ class AutoAccessionLoader:
         # reference domain_id -> (is_obsolete, classification_status, superseded_by,
         #                         has_assignment) | 'MISSING'
         self._reference_status_cache = {}
+        # F-group -> current rep (domains.id) for representative_domain_id; loaded on first use
+        self._rep_resolver: Optional[FGroupRepResolver] = None
         self.connection_params = connection_params or {
             "host": "dione",
             "port": 45000,
@@ -421,6 +424,12 @@ class AutoAccessionLoader:
         finally:
             cursor.close()
             conn.close()
+
+    def _rep_for_f_group(self, f_group: Optional[str]) -> Optional[int]:
+        """ecod_commons.domains.id of the current rep of `f_group` (None for X.H.T.0 or no rep)."""
+        if getattr(self, "_rep_resolver", None) is None:
+            self._rep_resolver = FGroupRepResolver(self._get_connection)
+        return self._rep_resolver.rep_for(f_group)
 
     def _check_reference_active(self, reference_domain_id: Optional[str]) -> Optional[str]:
         """Return a rejection message if the source reference is not fit to propagate.
@@ -670,7 +679,8 @@ class AutoAccessionLoader:
             h_group: H-group classification
             x_group: X-group classification
             f_group: F-group classification (optional)
-            derived_from_uid: UID of the reference domain
+            derived_from_uid: ecod_uid of the reference domain (provenance; written to
+                f_group_assignments.representative_domain_ecod_uid only)
             context: ProcessingContext with batch and version tracking
             confidence: Classification confidence score
             sequence_length: DEPRECATED -- retained for call-site compatibility but NOT
@@ -829,6 +839,18 @@ class AutoAccessionLoader:
                 # Use context for domain_version tracking
                 domain_version = context.to_domain_version()
 
+                # Backstop: never let a non-F-group value reach f_group_id. A
+                # malformed value becomes None here, so the branch below records the
+                # domain as topology-only instead. See database/group_ids.py.
+                f_group = clean_f_group(
+                    f_group, context=f"{pdb_id}_{chain_id} domain {domain_num}", log=logger
+                )
+                # representative_domain_id is ecod_commons.domains.id of the current rep
+                # of the domain's own F-group (policy; see database/rep_pointers.py). It
+                # used to receive derived_from_uid -- an ecod_uid, the wrong key -- and
+                # the production path passed None, leaving every new domain NULL.
+                rep_domain_id = self._rep_for_f_group(f_group)
+
                 cursor.execute("""
                     INSERT INTO ecod_commons.domains (
                         ecod_uid,
@@ -864,19 +886,12 @@ class AutoAccessionLoader:
                     parsed_range.total_length,
                     parsed_range.is_discontinuous,
                     confidence,
-                    derived_from_uid,
+                    rep_domain_id,
                     f'pyecod_prod_{context.pyecod_prod_version or "unknown"}',
                     version_id
                 ))
 
                 domain_db_id = cursor.fetchone()[0]
-
-                # Backstop: never let a non-F-group value reach f_group_id. A
-                # malformed value becomes None here, so the branch below records the
-                # domain as topology-only instead. See database/group_ids.py.
-                f_group = clean_f_group(
-                    f_group, context=f"{pdb_id}_{chain_id} domain {domain_num}", log=logger
-                )
 
                 # Insert T-group assignment if we have T/H/X but no F
                 if t_group and not f_group:
