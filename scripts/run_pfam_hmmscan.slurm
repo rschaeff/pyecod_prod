@@ -7,14 +7,16 @@
 #SBATCH --output=slurm_logs/pfam_%a.out
 #SBATCH --error=slurm_logs/pfam_%a.err
 
-# Pfam v38.1 hmmscan for pyecod_prod auto-accessioned domains
+# Pfam hmmscan for pyecod_prod auto-accessioned domains (default Pfam 39.0, ECOD v296+).
+# PFAM_VERSION / PFAM_DB override the release, e.g. PFAM_VERSION=v38.2 for older batches.
 # Note: --array parameter set by submit script based on chunk count
 
 set -euo pipefail
 
 # Configuration
 HMMER_BIN="/data/ecod/hmmer-3.1b2/binaries"
-PFAM_DB="${HOME}/data/pfam/v38.1/Pfam-A.hmm"
+PFAM_VERSION="${PFAM_VERSION:-39.0}"
+PFAM_DB="${PFAM_DB:-${HOME}/data/pfam/${PFAM_VERSION}/Pfam-A.hmm}"
 BATCH_DIR="${BATCH_DIR:-/data/ecod/pdb_updates/batches/ecod_q4_2025_q1_2026}"
 CHUNK_DIR="${BATCH_DIR}/domains/chunks"
 RESULT_DIR="${BATCH_DIR}/pfam"
@@ -36,12 +38,13 @@ fi
 NUM_SEQS=$(grep -c '^>' "$INPUT_FASTA")
 
 echo "========================================================================"
-echo "Pfam v38.1 hmmscan - pyecod_prod Batch"
+echo "Pfam ${PFAM_VERSION} hmmscan - pyecod_prod Batch"
 echo "========================================================================"
 echo "Start time: $(date)"
 echo "Node: $(hostname)"
 echo "CPUs: ${SLURM_CPUS_PER_TASK}"
 echo "Batch dir: $BATCH_DIR"
+echo "Pfam DB: $PFAM_DB"
 echo "Input: $INPUT_FASTA"
 echo "Sequences: $NUM_SEQS"
 echo "Output: ${OUTPUT_BASE}.domtblout"
@@ -59,6 +62,15 @@ time ${HMMER_BIN}/hmmscan \
     --noali \
     ${PFAM_DB} \
     ${INPUT_FASTA} > ${OUTPUT_BASE}.out
+
+# A chunk counts only once HMMER's end-of-run footer is present: in February 2026, 94
+# chunks cut off by the time limit left partial tables that were loaded as "no hit".
+for t in tblout domtblout; do
+    if ! tail -n 1 "${OUTPUT_BASE}.${t}" | grep -q '^# \[ok\]'; then
+        echo "ERROR: ${OUTPUT_BASE}.${t} has no HMMER '# [ok]' footer (truncated run)"
+        exit 1
+    fi
+done
 
 echo ""
 echo "Hmmscan completed successfully"
