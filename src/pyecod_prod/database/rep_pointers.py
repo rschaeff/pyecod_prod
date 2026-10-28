@@ -25,7 +25,9 @@ X.H.T.0 domains get no pointer from here: whether they should have one is unreso
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+from .group_ids import is_f_group
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +85,8 @@ class FGroupRepResolver:
                     sum(len(v) for v in reps.values()), len(reps))
 
     def rep_for(self, f_group: Optional[str]) -> Optional[int]:
-        """The rep's ``domains.id``, or None for X.H.T.0 / no usable rep."""
-        if not f_group or is_topology_only(f_group):
+        """The rep's ``domains.id``, or None for X.H.T.0, a non-F-group value or no usable rep."""
+        if not is_f_group(f_group) or is_topology_only(f_group):
             return None
         if f_group in self._chosen:
             return self._chosen[f_group]
@@ -138,7 +140,13 @@ def _where(uid_range=None, assigned_by=None, assigned_since=None, domain_ids=Non
 
 
 def classify(f_group: str, pointer: Optional[int], pointer_f: Optional[str]) -> str:
-    """ok / no_pointer / cross_f / cross_h for a domain in a real F-group; dot0 otherwise."""
+    """ok / no_pointer / cross_f / cross_h for a domain in a real F-group.
+
+    dot0 for X.H.T.0, not_f_group for a value that is not an F-group id (e.g. an EPP
+    accession written by resolve_fgroups); both are reported, not failed.
+    """
+    if not is_f_group(f_group):
+        return "not_f_group"
     if is_topology_only(f_group):
         return "dot0"
     if pointer is None:
@@ -162,12 +170,12 @@ def check_rep_pointers(conn, **select) -> Tuple[Dict[str, int], List[tuple]]:
         rows = cur.fetchall()
     finally:
         cur.close()
-    counts = {k: 0 for k in ("ok", "no_pointer", "cross_f", "cross_h", "dot0")}
+    counts = {k: 0 for k in ("ok", "no_pointer", "cross_f", "cross_h", "dot0", "not_f_group")}
     fails = []
     for dom_pk, dom, f, ptr, ptr_f in rows:
         k = classify(f, ptr, ptr_f)
         counts[k] += 1
-        if k not in ("ok", "dot0"):
+        if k in ("no_pointer", "cross_f", "cross_h"):
             fails.append((dom_pk, dom, f, ptr, k))
     return counts, fails
 
@@ -177,26 +185,24 @@ def reset_rep_pointers(conn, resolver: FGroupRepResolver, *, dry_run: bool = Tru
     """Point every selected non-rep domain in a real F-group at its F-group's current rep.
 
     For any step that changes ``f_group_assignments.f_group_id`` after accession
-    (resolve_fgroups, Pfam passes, curation). A pointer already at a current rep of the
-    domain's F-group is kept. Commits unless ``dry_run``.
+    (resolve_fgroups, Pfam passes, curation). A pointer already in the domain's own
+    F-group is kept (it meets the policy; e.g. a propagated member pointing at its cluster
+    rep), so only NULL and out-of-F-group pointers change. Commits unless ``dry_run``.
     """
     where, params = _where(**select)
     cur = conn.cursor()
-    counts = {"kept": 0, "set": 0, "no_rep": 0, "dot0": 0}
+    counts = {"kept": 0, "set": 0, "no_rep": 0, "dot0": 0, "not_f_group": 0}
     updates = []
     try:
         cur.execute(_TARGET_SQL.format(where=where), params)
         for dom_pk, _dom, f, ptr, ptr_f in cur.fetchall():
-            if is_topology_only(f):
-                counts["dot0"] += 1
+            k = classify(f, ptr, ptr_f)
+            if k in ("dot0", "not_f_group", "ok"):
+                counts["kept" if k == "ok" else k] += 1
                 continue
             new = resolver.rep_for(f)
             if new is None:
                 counts["no_rep"] += 1
-            elif ptr is not None and ptr_f == f and _is_current_rep(resolver, f, ptr):
-                counts["kept"] += 1
-            elif ptr == new:
-                counts["kept"] += 1
             else:
                 updates.append((new, dom_pk))
                 counts["set"] += 1
@@ -209,6 +215,3 @@ def reset_rep_pointers(conn, resolver: FGroupRepResolver, *, dry_run: bool = Tru
         cur.close()
     return counts
 
-
-def _is_current_rep(resolver: FGroupRepResolver, f_group: str, dom_pk: int) -> bool:
-    return any(c[0] == dom_pk for c in (resolver._reps or {}).get(f_group, ()))

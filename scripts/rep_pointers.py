@@ -10,7 +10,8 @@ Policy: a non-rep domain's rep must be in its own F-group (database/rep_pointers
          changes f_group_assignments after accession (resolve_fgroups, Pfam passes,
          curation). Dry run unless --commit.
 
-X.H.T.0 domains are counted, never failed or changed (policy unresolved).
+X.H.T.0 domains (policy unresolved) and non-F-group values such as EPP accessions are
+counted, never failed or changed.
 
 Usage:
     python scripts/rep_pointers.py check --uid-range 5347772-5352817
@@ -63,7 +64,7 @@ def main():
         if args.action == "check":
             counts, fails = check_rep_pointers(conn, **select)
             for k, v in counts.items():
-                flag = "   FAIL" if v and k not in ("ok", "dot0") else ""
+                flag = "   FAIL" if v and k in ("no_pointer", "cross_f", "cross_h") else ""
                 logger.info(f"  {k:<11}{v:>9,}{flag}")
             if args.list:
                 with open(args.list, "w") as out:

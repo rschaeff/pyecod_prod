@@ -10,7 +10,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pyecod_prod.database.rep_pointers import FGroupRepResolver, classify, is_topology_only
+from pyecod_prod.database.rep_pointers import (
+    FGroupRepResolver,
+    classify,
+    is_topology_only,
+    reset_rep_pointers,
+)
 
 from test_f_group_id_validation import (  # noqa: F401  (fixtures)
     TEST_REP_DOMAIN_ID,
@@ -81,12 +86,67 @@ class TestClassify:
         ("2004.1.1.1", 5, "2004.1.2.3", "cross_f"),   # same H, other T
         ("2004.1.1.1", 5, "2005.1.1.1", "cross_h"),
         ("2004.1.1.0", None, None, "dot0"),
+        ("EPP00022109", None, None, "not_f_group"),
     ])
     def test_classes(self, f, ptr, ptr_f, want):
         assert classify(f, ptr, ptr_f) == want
 
     def test_topology_only(self):
         assert is_topology_only("101.1.2.0") and not is_topology_only("101.1.2.10")
+
+
+class _ResetCursor:
+    """Returns canned target rows; records the UPDATE batch."""
+
+    def __init__(self, rows):
+        self.rows, self.updates = rows, None
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return self.rows
+
+    def executemany(self, sql, seq):
+        self.updates = list(seq)
+
+    def close(self):
+        pass
+
+
+class TestReset:
+    # (domain pk, domain_id, f_group, pointer, pointer's f_group)
+    ROWS = [
+        (1, "a", "2004.1.1.1", None, None),           # NULL          -> set
+        (2, "b", "2004.1.1.1", 900, "2004.1.1.7"),    # other F       -> set
+        (3, "c", "2004.1.1.1", 901, "2004.1.1.1"),    # same F        -> kept
+        (4, "d", "2004.1.1.0", None, None),           # .0            -> untouched
+        (5, "e", "EPP00022109", None, None),          # not F         -> untouched
+        (6, "f", "2004.1.1.9", None, None),           # F has no rep  -> no_rep
+    ]
+
+    def _run(self, dry_run):
+        cur = _ResetCursor(list(self.ROWS))
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        resolver, _ = _resolver([("2004.1.1.1", 11, False, 500)])
+        counts = reset_rep_pointers(conn, resolver, dry_run=dry_run, domain_ids=[1])
+        return counts, cur, conn
+
+    def test_only_null_and_out_of_f_pointers_change(self):
+        counts, cur, conn = self._run(dry_run=False)
+        assert counts == {"kept": 1, "set": 2, "no_rep": 1, "dot0": 1, "not_f_group": 1}
+        assert cur.updates == [(11, 1), (11, 2)]
+        conn.commit.assert_called_once()
+
+    def test_dry_run_writes_nothing(self):
+        counts, cur, conn = self._run(dry_run=True)
+        assert counts["set"] == 2 and cur.updates is None
+        conn.commit.assert_not_called()
+
+    def test_selection_required(self):
+        with pytest.raises(ValueError):
+            reset_rep_pointers(MagicMock(), MagicMock())
 
 
 class TestAccessionWritesPointer:
