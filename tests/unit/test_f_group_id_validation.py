@@ -97,6 +97,10 @@ class TestValidatorContract:
 TEST_VERSION_ID = 7777
 
 
+# ecod_commons.domains.id the stubbed rep lookup returns for any real F-group
+TEST_REP_DOMAIN_ID = 777001
+
+
 class _RecordingCursor:
     """Captures executed SQL so the test can assert which table was written."""
 
@@ -168,6 +172,9 @@ def loader_with_recording_cursor(monkeypatch):
     monkeypatch.setattr(loader, "_get_or_create_protein", lambda *a, **k: 4242, raising=False)
     monkeypatch.setattr(loader, "_get_next_uid", lambda *a, **k: 999999, raising=False)
     monkeypatch.setattr(loader, "_get_version_id", lambda *a, **k: TEST_VERSION_ID, raising=False)
+    monkeypatch.setattr(loader, "_rep_for_f_group",
+                        lambda f: None if not f or f.endswith(".0") else TEST_REP_DOMAIN_ID,
+                        raising=False)
     return loader, cursor
 
 
