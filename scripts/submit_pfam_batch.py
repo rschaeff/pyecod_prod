@@ -91,7 +91,7 @@ def get_domain_sequences(conn, domain_version_pattern: str) -> List[Dict]:
     return results
 
 
-def write_combined_fasta(sequences: List[Dict], output_path: Path) -> int:
+def write_combined_fasta(sequences: List[Dict], output_path: Path, pfam_version: str) -> int:
     """
     Write sequences to combined FASTA file.
 
@@ -100,7 +100,7 @@ def write_combined_fasta(sequences: List[Dict], output_path: Path) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'w') as f:
-        f.write(f"# Domain sequences for Pfam v38.1 scanning\n")
+        f.write(f"# Domain sequences for Pfam {pfam_version} scanning\n")
         f.write(f"# Generated: {datetime.now().isoformat()}\n")
         f.write(f"# Sequences: {len(sequences)}\n")
 
@@ -169,7 +169,7 @@ def split_fasta_into_chunks(input_fasta: Path, chunk_dir: Path,
     return current_chunk
 
 
-def submit_slurm_job(batch_dir: Path, num_chunks: int, dry_run: bool = False) -> str:
+def submit_slurm_job(batch_dir: Path, num_chunks: int, pfam_version: str, dry_run: bool = False) -> str:
     """
     Submit SLURM array job for Pfam scanning.
 
@@ -181,7 +181,7 @@ def submit_slurm_job(batch_dir: Path, num_chunks: int, dry_run: bool = False) ->
     cmd = [
         'sbatch',
         f'--array=1-{num_chunks}',
-        f'--export=ALL,BATCH_DIR={batch_dir}',
+        f'--export=ALL,BATCH_DIR={batch_dir},PFAM_VERSION={pfam_version}',
         str(SLURM_SCRIPT)
     ]
 
@@ -218,6 +218,10 @@ def main():
         help="Domain version pattern (LIKE syntax)"
     )
     parser.add_argument(
+        "--pfam-version", default="39.0",
+        help="Pfam release under ~/data/pfam/ (default: 39.0, ECOD v296+)"
+    )
+    parser.add_argument(
         "--seqs-per-chunk", type=int, default=1000,
         help="Sequences per chunk (default: 1000)"
     )
@@ -233,7 +237,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("Pfam v38.1 Batch Submission")
+    logger.info(f"Pfam {args.pfam_version} Batch Submission")
     logger.info("=" * 60)
     logger.info(f"Batch directory: {args.batch_dir}")
     logger.info(f"Domain version pattern: {args.domain_version_pattern}")
@@ -263,7 +267,7 @@ def main():
 
         # Write combined FASTA
         logger.info(f"Writing combined FASTA to {combined_fasta}...")
-        write_combined_fasta(sequences, combined_fasta)
+        write_combined_fasta(sequences, combined_fasta, args.pfam_version)
     else:
         logger.info(f"Skipping FASTA generation, using existing {combined_fasta}")
         if not combined_fasta.exists():
@@ -276,7 +280,7 @@ def main():
 
     # Submit SLURM job
     logger.info("Submitting SLURM job...")
-    job_id = submit_slurm_job(args.batch_dir, num_chunks, dry_run=args.dry_run)
+    job_id = submit_slurm_job(args.batch_dir, num_chunks, args.pfam_version, dry_run=args.dry_run)
 
     # Summary
     logger.info("")
