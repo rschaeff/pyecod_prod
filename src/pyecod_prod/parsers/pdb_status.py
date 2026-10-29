@@ -46,13 +46,20 @@ def construct_sequences(cif: Dict[str, list]) -> Dict[str, Tuple[str, int]]:
     disordered region matched no atoms at all. That was the June 2026 seqid bug
     (~33k pyecod_prod domains remapped) and it recurred in the Q4 2026 batch.
 
+    The second value is the number of observed (modeled) positions, which is what the
+    peptide threshold should test: a long construct with a few modeled residues is
+    no more classifiable than a peptide. See chain_schemes for the rules.
+    """
+    return {chain: (seq, len(obs)) for chain, (seq, obs) in chain_schemes(cif).items()}
+
+
+def chain_schemes(cif: Dict[str, list]) -> Dict[str, Tuple[str, set]]:
+    """Per author chain: (construct sequence, set of observed seq_ids), from _pdbx_poly_seq_scheme.
+
     Only polypeptide entities; a chain with no observed residue (auth_seq_num all
     '?') is omitted, as it has no structure to classify. Non-standard residues map to
     their parent (MSE -> M), unknown ones to X, so length always equals the last
-    seq_id. Microheterogeneity (two monomers at one seq_id) keeps the first. The
-    second value is the number of observed (modeled) positions, which is what the
-    peptide threshold should test: a long construct with a few modeled residues is
-    no more classifiable than a peptide.
+    seq_id. Microheterogeneity (two monomers at one seq_id) keeps the first.
     """
     def col(name):
         v = cif.get(name, [])
@@ -83,7 +90,7 @@ def construct_sequences(cif: Dict[str, list]) -> Dict[str, Tuple[str, int]]:
             observed.setdefault(strand, set()).add(pos)
     return {
         strand: ("".join(pos_aa[i] if i in pos_aa else "X" for i in range(1, max(pos_aa) + 1)),
-                 len(observed[strand]))
+                 observed[strand])
         for strand, pos_aa in residues.items()
         if pos_aa and observed.get(strand)
     }
