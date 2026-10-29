@@ -24,11 +24,69 @@ from pyecod_prod.utils.designed_proteins import (
 )
 
 try:
-    from Bio.PDB import MMCIFParser
-    from Bio.PDB.Polypeptide import is_aa
+    from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+    from Bio.Data.PDBData import protein_letters_3to1_extended
     HAS_BIOPYTHON = True
 except ImportError:
     HAS_BIOPYTHON = False
+
+
+def construct_sequences(cif: Dict[str, list]) -> Dict[str, Tuple[str, int]]:
+    """Construct (SEQRES) sequence per author chain, indexed by seq_id, and its observed count.
+
+    ECOD's seqid convention: position i of a chain is _pdbx_poly_seq_scheme.seq_id i,
+    the entity_poly_seq index -- every residue of the deposited construct, modeled or
+    not. Domain ranges (ecod_commons.domains.range_definition) are positions in this
+    sequence, so the sequence searched by BLAST/HHsearch and partitioned by
+    pyecod_mini must be this one.
+
+    It must NOT be the modeled residues. Enumerating the model's standard residues
+    (Biopython's chain iteration) drops unmodeled ones, so every range on a chain
+    with an unmodeled N-terminus came out shifted by the offset, and a range over a
+    disordered region matched no atoms at all. That was the June 2026 seqid bug
+    (~33k pyecod_prod domains remapped) and it recurred in the Q4 2026 batch.
+
+    Only polypeptide entities; a chain with no observed residue (auth_seq_num all
+    '?') is omitted, as it has no structure to classify. Non-standard residues map to
+    their parent (MSE -> M), unknown ones to X, so length always equals the last
+    seq_id. Microheterogeneity (two monomers at one seq_id) keeps the first. The
+    second value is the number of observed (modeled) positions, which is what the
+    peptide threshold should test: a long construct with a few modeled residues is
+    no more classifiable than a peptide.
+    """
+    def col(name):
+        v = cif.get(name, [])
+        return v if isinstance(v, list) else [v]
+
+    protein_entities = {
+        eid for eid, t in zip(col("_entity_poly.entity_id"), col("_entity_poly.type"))
+        if "polypeptide" in t.lower()
+    }
+    residues: Dict[str, Dict[int, str]] = {}
+    observed: Dict[str, set] = {}
+    for eid, sid, mon, auth_num, strand in zip(
+        col("_pdbx_poly_seq_scheme.entity_id"),
+        col("_pdbx_poly_seq_scheme.seq_id"),
+        col("_pdbx_poly_seq_scheme.mon_id"),
+        col("_pdbx_poly_seq_scheme.auth_seq_num"),
+        col("_pdbx_poly_seq_scheme.pdb_strand_id"),
+    ):
+        if eid not in protein_entities:
+            continue
+        try:
+            pos = int(sid)
+        except ValueError:
+            continue
+        chain = residues.setdefault(strand, {})
+        chain.setdefault(pos, protein_letters_3to1_extended.get(mon.upper(), "X"))
+        if auth_num not in ("?", "."):
+            observed.setdefault(strand, set()).add(pos)
+    return {
+        strand: ("".join(pos_aa[i] if i in pos_aa else "X" for i in range(1, max(pos_aa) + 1)),
+                 len(observed[strand]))
+        for strand, pos_aa in residues.items()
+        if pos_aa and observed.get(strand)
+    }
 
 
 @dataclass
@@ -94,8 +152,6 @@ class PDBStatusParser:
                 "Biopython is required for PDBStatusParser. "
                 "Install with: pip install biopython"
             )
-
-        self.parser = MMCIFParser(QUIET=True)
 
         # Initialize designed protein detector if filtering is enabled
         if self.filter_designed_proteins:
@@ -192,6 +248,10 @@ class PDBStatusParser:
         """
         Parse mmCIF file and extract all protein chains with sequences.
 
+        The sequence is the construct sequence in seqid order (see
+        construct_sequences), so ranges partitioned against it are seqid ranges.
+        Chain IDs are author chain IDs (pdb_strand_id).
+
         Args:
             pdb_id: PDB ID
 
@@ -204,56 +264,32 @@ class PDBStatusParser:
             # Handle gzipped files
             if str(mmcif_path).endswith('.gz'):
                 with gzip.open(mmcif_path, 'rt') as f:
-                    structure = self.parser.get_structure(pdb_id, f)
+                    cif = MMCIF2Dict(f)
             else:
-                structure = self.parser.get_structure(pdb_id, str(mmcif_path))
+                cif = MMCIF2Dict(str(mmcif_path))
         except Exception as e:
             raise ValueError(f"Failed to parse {mmcif_path}: {e}")
 
         chains = []
 
-        for model in structure:
-            for chain in model:
-                chain_id = chain.get_id()
+        for chain_id, (sequence_str, n_observed) in construct_sequences(cif).items():
+            sequence_length = len(sequence_str)
 
-                # Extract sequence from residues
-                sequence = []
-                for residue in chain:
-                    if residue.id[0] == " ":  # Standard residue (not HETATM)
-                        resname = residue.get_resname()
-                        # Check if it's a standard amino acid
-                        if is_aa(resname, standard=True):
-                            # Convert 3-letter to 1-letter code
-                            try:
-                                from Bio.SeqUtils import seq1
-                                aa = seq1(resname)
-                                sequence.append(aa)
-                            except (KeyError, ValueError):
-                                # Unknown residue - skip
-                                pass
+            # Determine if classifiable; the peptide test counts modeled residues
+            can_classify, reason = self._is_classifiable(
+                sequence_str, n_observed, pdb_id, chain_id
+            )
 
-                if not sequence:
-                    # Empty chain or no amino acids
-                    continue
+            chain_info = ChainInfo(
+                pdb_id=pdb_id.lower(),
+                chain_id=chain_id,
+                sequence=sequence_str,
+                sequence_length=sequence_length,
+                can_classify=can_classify,
+                cannot_classify_reason=reason,
+            )
 
-                sequence_str = "".join(sequence)
-                sequence_length = len(sequence_str)
-
-                # Determine if classifiable
-                can_classify, reason = self._is_classifiable(
-                    sequence_str, sequence_length, pdb_id, chain_id
-                )
-
-                chain_info = ChainInfo(
-                    pdb_id=pdb_id.lower(),
-                    chain_id=chain_id,
-                    sequence=sequence_str,
-                    sequence_length=sequence_length,
-                    can_classify=can_classify,
-                    cannot_classify_reason=reason,
-                )
-
-                chains.append(chain_info)
+            chains.append(chain_info)
 
         return chains
 
@@ -312,7 +348,7 @@ class PDBStatusParser:
 
         Args:
             sequence: Amino acid sequence
-            length: Sequence length
+            length: Number of modeled residues (the peptide test)
             pdb_id: PDB identifier (for designed protein check)
             chain_id: Author chain ID (for per-chain designed protein check)
 
