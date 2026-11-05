@@ -105,3 +105,27 @@ versions:
     domain_definitions_csv: /data/ecod/database_versions/v295.2/reference/domain_definitions.csv
     domain_lengths_csv: /data/ecod/database_versions/v295.2/reference/domain_lengths.csv
     protein_lengths_csv: /data/ecod/database_versions/v295.2/reference/protein_lengths.csv
+
+  v296:
+    # Q4 2026 PDB batch + Pfam 39.0. Bulk files and reference CSVs regenerated
+    # 2026-10-30 after the Q4 seqid remap (4,168 Q4 domains moved from modeled-ordinal
+    # to construct numbering; 2,078 F-groups reclustered). See v296/README.md.
+    summary_suffix: develop291
+    # BLAST DBs: ecod100 rebuilt 2026-10-30 after the remap (2,947,839 domain
+    # sequences). chainwise100 built 2026-10-28 from protein sequences (889,875 chains,
+    # withdrawn entries excluded) and unaffected by the remap.
+    blast_chain_db: /data/ecod/database_versions/v296/blast/chainwise100.v296
+    blast_domain_db: /data/ecod/database_versions/v296/blast/ecod100.v296
+    # HHsearch: REBUILT, not carried forward (v295.2's carry-forward note asked for a
+    # re-measure). 35,507 F-group profiles: 31,913 reused from v295 where the seed is
+    # still a live member with the same sequence, 3,594 new, remapped F-groups rebuilt.
+    hhsearch_db: /data/ecod/database_versions/v296/hhsuite_db/db/ecod_v296_Fgroup
+    domains_txt: /data/ecod/database_versions/v296/bulk_files/ecod.v296.domains.txt
+    range_cache: null  # not needed; mini reference CSVs are generated below
+    family_lookup: /data/ecod/database_versions/v296/domain_family_lookup.tsv
+    classification_lookup: /data/ecod/database_versions/v296/domain_classification_lookup.tsv
+    # pyecod_mini reference CSVs (v296/scripts/generate_reference_artifacts.py, from the
+    # stripped domains.txt): 2,948,175 domains; protein_lengths 889,875 chains.
+    domain_definitions_csv: /data/ecod/database_versions/v296/reference/domain_definitions.csv
+    domain_lengths_csv: /data/ecod/database_versions/v296/reference/domain_lengths.csv
+    protein_lengths_csv: /data/ecod/database_versions/v296/reference/protein_lengths.csv
