@@ -16,6 +16,14 @@ Tier 3 (full re-classify):
     - Length difference >20%
     - Member needs full pyecod-mini classification
 
+Ranges (Tiers 1 and 2): the rep's seqid ranges are carried onto the member through a
+sequence alignment of the two construct sequences, then translated to the member's
+author numbering for domain_ranges (see range_mapping.py). A member whose ranges do not
+map cleanly is reported as RANGE_UNMAPPABLE and gets no domains.
+
+Members that already have active domains are skipped (ALREADY_CLASSIFIED), so a batch
+can be rerun safely.
+
 Usage:
     from pyecod_prod.database.cluster_propagation import ClusterPropagator
 
@@ -33,6 +41,7 @@ Usage:
 """
 
 from .group_ids import clean_f_group
+from .range_mapping import RangeMapper, RangeMappingError
 from .versions import current_development_version_id
 import logging
 import os
@@ -60,6 +69,7 @@ class PropagationTier(Enum):
     TIER3_RECLASSIFY = "tier3_reclassify"  # >20% length diff, needs full classification
     SINGLETON = "singleton"           # No members to propagate to
     ALREADY_CLASSIFIED = "already_classified"  # Member already has domains
+    RANGE_UNMAPPABLE = "range_unmappable"  # Rep ranges don't map cleanly onto member
 
 
 @dataclass
@@ -88,6 +98,7 @@ class PropagationSummary:
     tier2_skipped: int = 0  # Domain count mismatch
     tier3_needs_reclassify: int = 0
     already_classified: int = 0
+    range_unmappable: int = 0
     failed: int = 0
     total_domains_propagated: int = 0
     results: List[PropagationResult] = field(default_factory=list)
@@ -106,6 +117,7 @@ class PropagationSummary:
         print(f"  Tier 2 (skipped - domain count mismatch): {self.tier2_skipped}")
         print(f"  Tier 3 (needs re-classify): {self.tier3_needs_reclassify}")
         print(f"  Already classified: {self.already_classified}")
+        print(f"  Range unmappable (needs re-classify): {self.range_unmappable}")
         print(f"  Failed: {self.failed}")
         print(f"\nTotal domains propagated: {self.total_domains_propagated}")
         print(f"{'='*60}\n")
@@ -125,7 +137,9 @@ class ClusterPropagator:
         tier1_max_length_diff: float = 0.10,
         tier2_max_length_diff: float = 0.20,
         dry_run: bool = False,
-        connection_params: Optional[Dict] = None
+        connection_params: Optional[Dict] = None,
+        range_mapper: Optional[RangeMapper] = None,
+        pdb_mirror_path: str = "/usr2/pdb/data/structures/divided/mmCIF",
     ):
         """
         Initialize the propagator.
@@ -135,11 +149,20 @@ class ClusterPropagator:
             tier2_max_length_diff: Max length difference for Tier 2 verification
             dry_run: If True, don't actually insert into database
             connection_params: Database connection parameters (uses defaults if not provided)
+            range_mapper: Maps rep seqid ranges onto members; built over pdb_mirror_path
+                if not given
+            pdb_mirror_path: Local mmCIF mirror (divided layout)
         """
         self.tier1_max_length_diff = tier1_max_length_diff
         self.tier2_max_length_diff = tier2_max_length_diff
         self.dry_run = dry_run
         self.connection_params = connection_params or DEFAULT_CONNECTION_PARAMS
+        if range_mapper is None:
+            from ..parsers.pdb_status import PDBStatusParser
+            locator = PDBStatusParser(pdb_mirror_path=pdb_mirror_path,
+                                      filter_designed_proteins=False)
+            range_mapper = RangeMapper(locator.get_mmcif_path)
+        self.range_mapper = range_mapper
         # ecod_commons.versions.id stamped on every inserted row; resolved on first insert
         self._version_id: Optional[int] = None
 
@@ -262,8 +285,10 @@ class ClusterPropagator:
         cursor = conn.cursor()
 
         try:
+            # chain_status is keyed on (pdb_id, chain_id, release_date), so a chain
+            # can appear more than once; return each chain once (latest release).
             query = """
-                SELECT
+                SELECT DISTINCT ON (pdb_id, chain_id)
                     pdb_id, chain_id, sequence_length, ecod_status
                 FROM pdb_update.chain_status
                 WHERE representative_pdb_id = %s
@@ -276,6 +301,7 @@ class ClusterPropagator:
                 query += " AND release_date BETWEEN %s AND %s"
                 params.extend(release_dates)
 
+            query += " ORDER BY pdb_id, chain_id, release_date DESC"
             cursor.execute(query, params)
 
             members = []
@@ -293,13 +319,74 @@ class ClusterPropagator:
             cursor.close()
             conn.close()
 
+    def get_chains_with_domains(
+        self,
+        chains: List[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], int]:
+        """
+        Find which PDB chains already have active (non-obsolete) domains.
+
+        This is the idempotency check. It reads ecod_commons directly rather than
+        pdb_update.chain_status.ecod_status, which is not kept in sync.
+
+        Args:
+            chains: (pdb_id, chain_id) pairs; pdb_id case is ignored
+
+        Returns:
+            {(lowercase pdb_id, chain_id): active domain count} for chains with any
+        """
+        if not chains:
+            return {}
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT LOWER(p.pdb_id), p.chain_id, COUNT(d.id)
+                FROM ecod_commons.proteins p
+                JOIN ecod_commons.domains d
+                  ON d.protein_id = p.id AND d.is_obsolete = false
+                WHERE p.pdb_id = ANY(%s)  -- uses idx_proteins_pdb_id
+                AND (LOWER(p.pdb_id), p.chain_id) IN (
+                    SELECT * FROM unnest(%s::text[], %s::text[])
+                )
+                GROUP BY 1, 2
+            """, (
+                sorted({v for p, _ in chains for v in (p.lower(), p.upper())}),
+                [p.lower() for p, _ in chains],
+                [c for _, c in chains],
+            ))
+            return {(pdb, chain): n for pdb, chain, n in cursor.fetchall()}
+        finally:
+            cursor.close()
+            conn.close()
+
+    def _already_classified(
+        self,
+        member_pdb_id: str,
+        member_chain_id: str,
+        rep_pdb_id: str,
+        rep_chain_id: str,
+        n_domains: int
+    ) -> PropagationResult:
+        return PropagationResult(
+            member_pdb_id=member_pdb_id,
+            member_chain_id=member_chain_id,
+            representative_pdb_id=rep_pdb_id,
+            representative_chain_id=rep_chain_id,
+            tier=PropagationTier.ALREADY_CLASSIFIED,
+            success=True,
+            message=f"Already has {n_domains} active domains; skipped"
+        )
+
     def propagate_to_member(
         self,
         member_pdb_id: str,
         member_chain_id: str,
         rep_domains: List[Dict],
         domain_version: str,
-        tier: PropagationTier
+        tier: PropagationTier,
+        member_ranges: List[Tuple[str, str]],
     ) -> PropagationResult:
         """
         Propagate domain assignments from representative to a single member.
@@ -310,10 +397,16 @@ class ClusterPropagator:
             rep_domains: Domain assignments from representative
             domain_version: Domain version string for tracking
             tier: The propagation tier for this member
+            member_ranges: (seqid range, author range) on the member, one per rep
+                domain in the same order, from RangeMapper.map_member
 
         Returns:
             PropagationResult with outcome details
         """
+        if len(member_ranges) != len(rep_domains):
+            raise ValueError(
+                f"{len(member_ranges)} member ranges for {len(rep_domains)} rep domains")
+
         if self.dry_run:
             return PropagationResult(
                 member_pdb_id=member_pdb_id,
@@ -331,15 +424,35 @@ class ClusterPropagator:
         cursor = conn.cursor()
 
         try:
-            # Get or create protein record for member
+            # Get or create protein record for member. FOR UPDATE serializes
+            # concurrent propagations to the same chain, so the domain check
+            # below cannot race another run's insert.
             cursor.execute("""
                 SELECT id FROM ecod_commons.proteins
-                WHERE LOWER(pdb_id) = LOWER(%s) AND chain_id = %s
-            """, (member_pdb_id, member_chain_id))
+                WHERE pdb_id IN (LOWER(%s), UPPER(%s)) AND chain_id = %s
+                ORDER BY id
+                FOR UPDATE
+            """, (member_pdb_id, member_pdb_id, member_chain_id))
 
             result = cursor.fetchone()
             if result:
                 protein_id = result[0]
+
+                # Idempotency guard: never add a second set of domains to a chain
+                # that already has active ones (from this or any other version).
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM ecod_commons.domains d
+                    JOIN ecod_commons.proteins p ON p.id = d.protein_id
+                    WHERE p.pdb_id IN (LOWER(%s), UPPER(%s)) AND p.chain_id = %s
+                    AND d.is_obsolete = false
+                """, (member_pdb_id, member_pdb_id, member_chain_id))
+                n_existing = cursor.fetchone()[0]
+                if n_existing:
+                    conn.rollback()
+                    return self._already_classified(
+                        member_pdb_id, member_chain_id, "", "", n_existing
+                    )
             else:
                 # Create protein record
                 source_id = f"{member_pdb_id}_{member_chain_id}"
@@ -352,21 +465,15 @@ class ClusterPropagator:
 
             domains_created = 0
 
-            for i, rep_domain in enumerate(rep_domains, 1):
+            for i, (rep_domain, (member_range, member_pdb_range)) in enumerate(
+                zip(rep_domains, member_ranges), 1
+            ):
                 # Generate domain ID for member
                 # Replace the representative's PDB/chain with member's.
                 # Multi-char chains get a '_' separator before the ordinal to avoid
                 # id collisions (see parsers.generate_ecod_domain_id).
                 _sep = "_" if len(member_chain_id) > 1 else ""
                 member_domain_id = f"e{member_pdb_id.lower()}{member_chain_id}{_sep}{i}"
-
-                # Transform range definition for member chain
-                # Replace rep chain prefix with member chain prefix
-                rep_range = rep_domain['range_definition']
-                member_range = self._transform_range_for_member(
-                    rep_range,
-                    member_chain_id
-                )
 
                 # Get new UID
                 cursor.execute("SELECT nextval('ecod_commons.ecod_uid_sequence')")
@@ -376,16 +483,16 @@ class ClusterPropagator:
                 cursor.execute("""
                     INSERT INTO ecod_commons.domains (
                         protein_id, domain_id, ecod_uid, range_definition,
-                        is_discontinuous, classification_confidence, representative_domain_id,
-                        domain_version, is_obsolete, version_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false, %s)
+                        range_type, is_discontinuous, classification_confidence,
+                        representative_domain_id, domain_version, is_obsolete, version_id
+                    ) VALUES (%s, %s, %s, %s, 'seqid', %s, %s, %s, %s, false, %s)
                     RETURNING id
                 """, (
                     protein_id,
                     member_domain_id,
                     new_uid,
                     member_range,
-                    rep_domain['is_discontinuous'],
+                    ',' in member_range,
                     rep_domain['confidence'],
                     rep_domain['id'],  # Link to representative's domain ID (primary key)
                     f"{domain_version}_propagated",
@@ -436,13 +543,13 @@ class ClusterPropagator:
                         version_id
                     ))
 
-                # Insert domain_ranges entry (PDB range)
+                # Insert domain_ranges entry: AUTHOR numbering, never the seqid range
                 cursor.execute("""
                     INSERT INTO ecod_commons.domain_ranges (
                         domain_id, range_definition, range_type, is_primary,
                         source, confidence, created_date, created_by
                     ) VALUES (%s, %s, 'pdb', true, 'pyecod_prod', 1.0, NOW(), 'propagation')
-                """, (domain_db_id, member_range))
+                """, (domain_db_id, member_pdb_range))
 
                 domains_created += 1
 
@@ -475,39 +582,6 @@ class ClusterPropagator:
         finally:
             cursor.close()
             conn.close()
-
-    def _transform_range_for_member(
-        self,
-        rep_range: str,
-        member_chain_id: str
-    ) -> str:
-        """
-        Transform a range definition from representative to member chain.
-
-        For example, "A:1-100,A:150-200" becomes "B:1-100,B:150-200" for chain B.
-
-        Args:
-            rep_range: Range definition from representative
-            member_chain_id: Chain ID for member
-
-        Returns:
-            Transformed range definition
-        """
-        import re
-
-        # Pattern matches chain prefix like "A:", "BA:", "A4:", "f9:", "0:"
-        # Chain IDs in mmCIF can be alphanumeric (label_asym_id)
-        pattern = r'^([A-Za-z0-9]+):'
-
-        parts = rep_range.split(',')
-        transformed = []
-
-        for part in parts:
-            # Replace the chain prefix
-            transformed_part = re.sub(pattern, f"{member_chain_id}:", part)
-            transformed.append(transformed_part)
-
-        return ','.join(transformed)
 
     def propagate_from_representative(
         self,
@@ -558,17 +632,19 @@ class ClusterPropagator:
             rep_pdb_id, rep_chain_id, release_dates
         )
 
+        # Skip members that already have active domains. This is checked against
+        # ecod_commons, not chain_status.ecod_status: that flag is stale, and
+        # trusting it let reruns insert a second copy of every member's domains.
+        existing = self.get_chains_with_domains(
+            [(m['pdb_id'], m['chain_id']) for m in members]
+        )
+
         for member in members:
-            # Check if member already has domains
-            if member['ecod_status'] == 'in_current_ecod':
-                results.append(PropagationResult(
-                    member_pdb_id=member['pdb_id'],
-                    member_chain_id=member['chain_id'],
-                    representative_pdb_id=rep_pdb_id,
-                    representative_chain_id=rep_chain_id,
-                    tier=PropagationTier.ALREADY_CLASSIFIED,
-                    success=True,
-                    message="Already classified"
+            n_existing = existing.get((member['pdb_id'].lower(), member['chain_id']), 0)
+            if n_existing:
+                results.append(self._already_classified(
+                    member['pdb_id'], member['chain_id'],
+                    rep_pdb_id, rep_chain_id, n_existing
                 ))
                 continue
 
@@ -580,27 +656,35 @@ class ClusterPropagator:
 
             length_diff_pct = abs(member['sequence_length'] - rep_length) / rep_length if rep_length > 0 else 1.0
 
-            if tier == PropagationTier.TIER1_AUTO:
-                # Auto-propagate
-                result = self.propagate_to_member(
-                    member['pdb_id'],
-                    member['chain_id'],
-                    rep_domains,
-                    domain_version,
-                    tier
-                )
-                result.length_diff_pct = length_diff_pct
-                results.append(result)
+            if tier in (PropagationTier.TIER1_AUTO, PropagationTier.TIER2_VERIFY):
+                # Tier 2's domain-count check is still a placeholder; both tiers
+                # propagate, but only through an alignment-based range mapping.
+                try:
+                    member_ranges = self.range_mapper.map_member(
+                        rep_pdb_id, rep_chain_id,
+                        member['pdb_id'], member['chain_id'],
+                        [d['range_definition'] for d in rep_domains],
+                    )
+                except RangeMappingError as e:
+                    results.append(PropagationResult(
+                        member_pdb_id=member['pdb_id'],
+                        member_chain_id=member['chain_id'],
+                        representative_pdb_id=rep_pdb_id,
+                        representative_chain_id=rep_chain_id,
+                        tier=PropagationTier.RANGE_UNMAPPABLE,
+                        success=False,
+                        length_diff_pct=length_diff_pct,
+                        message=f"Range mapping failed: {e}"
+                    ))
+                    continue
 
-            elif tier == PropagationTier.TIER2_VERIFY:
-                # Verify domain count first (placeholder - need member's domain count)
-                # For now, propagate but mark as tier 2
                 result = self.propagate_to_member(
                     member['pdb_id'],
                     member['chain_id'],
                     rep_domains,
                     domain_version,
-                    tier
+                    tier,
+                    member_ranges=member_ranges,
                 )
                 result.length_diff_pct = length_diff_pct
                 results.append(result)
@@ -698,5 +782,8 @@ class ClusterPropagator:
 
                 elif result.tier == PropagationTier.ALREADY_CLASSIFIED:
                     summary.already_classified += 1
+
+                elif result.tier == PropagationTier.RANGE_UNMAPPABLE:
+                    summary.range_unmappable += 1
 
         return summary
