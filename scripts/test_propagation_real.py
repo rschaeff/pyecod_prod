@@ -59,9 +59,14 @@ def main():
     for m in test_members:
         tier = propagator.classify_member_tier(m['sequence_length'], rep_length)
         if tier in [PropagationTier.TIER1_AUTO, PropagationTier.TIER2_VERIFY]:
+            member_ranges = propagator.range_mapper.map_member(
+                rep_pdb_id, rep_chain_id, m['pdb_id'], m['chain_id'],
+                [d['range_definition'] for d in rep_domains],
+            )
             result = propagator.propagate_to_member(
                 m['pdb_id'], m['chain_id'],
-                rep_domains, domain_version, tier
+                rep_domains, domain_version, tier,
+                member_ranges=member_ranges,
             )
             results.append(result)
             status = "✓" if result.success else "✗"

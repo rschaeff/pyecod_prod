@@ -261,8 +261,8 @@ def _rep_domain(f_group, t_group="2004.1.1"):
 def propagator_with_recording_cursor(monkeypatch):
     from pyecod_prod.database import cluster_propagation as cp
 
-    # protein lookup hit, then uid, then domain insert id -- enough for one member domain
-    cursor = _SequencedCursor([(4242,), (999999,), (12345,)])
+    # protein lookup hit, existing-domain count (0), uid, domain insert id -- one member domain
+    cursor = _SequencedCursor([(4242,), (0,), (999999,), (12345,)])
     conn = MagicMock()
     conn.cursor.return_value = cursor
 
@@ -285,6 +285,7 @@ class TestInheritanceRouting:
             member_pdb_id="9k4t", member_chain_id="A",
             rep_domains=rep_domains, domain_version="v295",
             tier=list(cp.PropagationTier)[0],
+            member_ranges=[("A:10-150", "A:10-150")] * len(rep_domains),
         )
 
     @pytest.mark.parametrize("bad", ["EPP00022109", "JACRDV010000115.1", "2004.1.1"])
